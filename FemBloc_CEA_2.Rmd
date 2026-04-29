@@ -1,0 +1,3622 @@
+---
+title: "FemBloc® vs Tubal Ligation — Cost-Effectiveness Analysis"
+author: "NESCILLAH AWINO OMONDI"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document: default
+  pdf_document: default
+subtitle: "Norwegian Women Aged 25–50 | 25-Year Hybrid Decision-Tree Markov Model"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+knitr::opts_knit$set(root.dir = "~/Desktop/Thesis- FEMBLOC/Submission docs/UPDATED R-code")
+```
+
+```{r}
+#TASK 1: 
+##########################################################
+# FECUNDITY DECAY FUNCTION
+# Source: Rothman et al. (2013) - Table 3
+# Volitional determinants and age-related decline in fecundability
+##########################################################
+
+library(dplyr)
+library(knitr)
+library(officer)
+library(flextable)
+
+#=============================================================================
+# STEP 1: Extract data from Rothman et al. Table 3 (Adjusted model)
+#=============================================================================
+
+# Data from Table 3 - Adjusted fecundability ratios (FR)
+# Reference category: women aged 20-24 years (FR = 1.00)
+
+rothman_data <- data.frame(
+  age_cat = c("20-24", "25-29", "30-34", "35-40"),
+  # Use midpoints for modeling
+  age_mid = c(22, 27, 32, 37.5),  # 37.5 as midpoint of 35-40
+  # Adjusted FR from Table 3
+  FR = c(1.00, 1.03, 1.05, 0.77),
+  # 95% CI from Table 3
+  FR_low = c(1.00, 0.90, 0.89, 0.62),
+  FR_high = c(1.00, 1.18, 1.23, 0.97),
+  # Sample sizes from Table 2
+  n_pregnancies = c(314, 996, 625, 140),
+  n_total = c(466, 1355, 791, 208)
+)
+
+cat("=== Rothman et al. (2013) Fecundability Ratios ===\n")
+print(rothman_data[, c("age_cat", "age_mid", "FR", "FR_low", "FR_high")])
+
+#=============================================================================
+# STEP 2: Set new baseline at age 25-29 (use age 27 as reference point)
+#=============================================================================
+
+# We want 25-29 age band to be the reference (FR = 1.00)
+# Current: age 20-24 = 1.00, age 25-29 = 1.03
+# Standardization factor = 1 / 1.03 = 0.9709
+
+baseline_age <- 27  # Midpoint of 25-29
+baseline_FR_original <- rothman_data$FR[rothman_data$age_cat == "25-29"]  # 1.03
+standardization_factor <- 1 / baseline_FR_original
+
+cat("\n=== Standardizing to Age 25-29 Baseline ===\n")
+cat("Original FR at 25-29:", baseline_FR_original, "\n")
+cat("Standardization factor:", round(standardization_factor, 4), "\n")
+cat("(Multiply all FR by", round(standardization_factor, 4), ")\n")
+
+# Create standardized dataset with age 25-29 as reference
+rothman_std <- rothman_data
+rothman_std$FR_std <- rothman_data$FR * standardization_factor
+rothman_std$FR_low_std <- rothman_data$FR_low * standardization_factor
+rothman_std$FR_high_std <- rothman_data$FR_high * standardization_factor
+
+cat("\n=== Standardized FR (25-29 = 1.00) ===\n")
+print(rothman_std[, c("age_cat", "age_mid", "FR_std", "FR_low_std", "FR_high_std")])
+
+#=============================================================================
+# STEP 3: Calculate decay rate from observed decline
+#=============================================================================
+
+# Use ages 27 (baseline) through 37.5 to calculate decay
+# FR at age 27: 1.00 (standardized)
+# FR at age 32: 1.05 * 0.9709 = 1.019
+# FR at age 37.5: 0.77 * 0.9709 = 0.748
+
+FR_27 <- rothman_std$FR_std[rothman_std$age_cat == "25-29"]  # 1.00
+FR_32 <- rothman_std$FR_std[rothman_std$age_cat == "30-34"]  # ~1.019
+FR_37.5 <- rothman_std$FR_std[rothman_std$age_cat == "35-40"]  # ~0.748
+
+# Calculate decay rate using 27 → 37.5 (10.5 years)
+decay_rate <- log(FR_37.5 / FR_27) / 10.5
+
+cat("\n=== Decay Rate Calculation ===\n")
+cat("FR at age 27 (baseline):", round(FR_27, 3), "\n")
+cat("FR at age 32:", round(FR_32, 3), "\n")
+cat("FR at age 37.5:", round(FR_37.5, 3), "\n")
+cat("Annual decay rate:", round(decay_rate, 4), 
+    "(", round(100 * (1 - exp(decay_rate)), 1), "% decline per year)\n")
+
+#=============================================================================
+# STEP 4: Derive empirical log-scale SE at each observed Rothman age point
+#         and fit a linear model to predict SE across ages 25-50.
+#
+# Rationale: Rather than imposing an arbitrary uncertainty growth rate,
+# we derive SE directly from Rothman et al.'s published 95% CIs at each
+# observed age point (27, 32, 37.5), then fit a linear regression of
+# SE ~ age through those points. This gives a fully data-driven,
+# auditable SE curve grounded in the source publication.
+#
+# Note: The 20-24 reference category is excluded — its CI is degenerate
+# (FR fixed at 1.00 with SE = 0 by construction, not by data).
+#=============================================================================
+
+# Convert to log scale
+rothman_std$logFR     <- log(rothman_std$FR_std)
+rothman_std$logFR_low <- log(rothman_std$FR_low_std)
+rothman_std$logFR_high<- log(rothman_std$FR_high_std)
+rothman_std$logFR_se  <- (rothman_std$logFR_high - rothman_std$logFR_low) / (2 * 1.96)
+
+# Exclude reference category (SE = 0 by construction, not informative)
+se_fit_data <- rothman_std[rothman_std$age_cat != "20-24",
+                            c("age_mid", "logFR_se")]
+
+cat("\n=== Empirical log-scale SEs from Rothman CIs ===\n")
+print(se_fit_data, row.names = FALSE)
+
+# Fit linear regression: SE ~ age
+se_lm <- lm(logFR_se ~ age_mid, data = se_fit_data)
+
+cat("\n=== Linear SE model (SE ~ age) ===\n")
+print(summary(se_lm))
+cat("Intercept:", round(coef(se_lm)[1], 6), "\n")
+cat("Slope (SE per year of age):", round(coef(se_lm)[2], 6), "\n")
+
+# Baseline SE at age 27 from the fitted model
+se_baseline <- predict(se_lm, newdata = data.frame(age_mid = 27))
+cat("\nFitted SE at age 27:", round(se_baseline, 4),
+    "(vs raw:", round(rothman_std$logFR_se[rothman_std$age_cat == "25-29"], 4), ")\n")
+
+#=============================================================================
+# STEP 5: Generate predictions for ages 25-50
+#=============================================================================
+
+age_seq <- 25:50
+pred_dat <- data.frame(
+  age = age_seq,
+  years_since_baseline = age_seq - 27
+)
+
+# Exponential decay formula for log-mean
+pred_dat$logFR_mean <- log(FR_27) + decay_rate * pred_dat$years_since_baseline
+
+# Data-driven SE: predicted from linear model fitted to Rothman CIs.
+# SE is constrained to be non-negative (extrapolation below age 27
+# could theoretically give negative fitted values; pmax guards against this).
+pred_dat$logFR_se <- pmax(
+  predict(se_lm, newdata = data.frame(age_mid = pred_dat$age)),
+  1e-6   # floor: SE cannot be zero or negative
+)
+
+cat("\n=== Fitted SE at key ages (data-driven, from Rothman CIs) ===\n")
+key_check <- pred_dat[pred_dat$age %in% c(25, 27, 30, 32, 35, 37, 40, 45, 50),
+                       c("age", "logFR_se")]
+print(key_check, row.names = FALSE)
+
+# Convert to original scale with log-normal properties
+pred_dat$FR_mean <- exp(pred_dat$logFR_mean + 0.5 * pred_dat$logFR_se^2)
+
+# 95% CI on original scale
+pred_dat$FR_low  <- exp(pred_dat$logFR_mean - 1.96 * pred_dat$logFR_se)
+pred_dat$FR_high <- exp(pred_dat$logFR_mean + 1.96 * pred_dat$logFR_se)
+
+#=============================================================================
+# STEP 6: Display key results
+#=============================================================================
+
+cat("\n=== Exponential Decay Model Results (Baseline Age 27) ===\n")
+cat("Annual decay rate:", round(decay_rate, 4), 
+    paste0("(", round(100 * (1 - exp(decay_rate)), 1), "%/year)\n"))
+
+key_ages <- c(27, 30, 32, 35, 37, 40, 45, 50)
+cat("\nKey age points:\n")
+print(pred_dat[pred_dat$age %in% key_ages, 
+               c("age", "FR_mean", "FR_low", "FR_high")], 
+      row.names = FALSE)
+
+#=============================================================================
+# STEP 7: Create Markov model age bands (for 25-50 population)
+#=============================================================================
+
+pred_dat$age_band <- cut(
+  pred_dat$age,
+  breaks = c(25, 30, 35, 40, 45, 51),  # 51 to include age 50
+  right = FALSE,
+  labels = c("25-29", "30-34", "35-39", "40-44", "45-50")
+)
+
+# Aggregate by evaluating parameters at each band midpoint age.
+# This ensures:
+#   (a) logFR_mean for 25-29 = exactly 0.000 (midpoint 27 = anchor)
+#   (b) logFR_mean for 45-50 matches PSA parameter at age 47
+
+band_midpoints <- c("25-29" = 27, "30-34" = 32, "35-39" = 37,
+                    "40-44" = 42, "45-50" = 47)
+
+band_summary <- do.call(rbind, lapply(names(band_midpoints), function(band) {
+  mid  <- band_midpoints[band]
+  row  <- pred_dat[pred_dat$age == mid, ]
+  lmu  <- row$logFR_mean
+  lvar <- row$logFR_se^2
+  data.frame(
+    age_band     = band,
+    n_ages       = sum(pred_dat$age_band == band),
+    midpoint_age = mid,
+    logFR_mean   = lmu,
+    logFR_var    = lvar,
+    FR_mean      = exp(lmu + 0.5 * lvar),
+    FR_sd        = sqrt((exp(lvar) - 1) * exp(2 * lmu + lvar)),
+    FR_low       = exp(lmu - 1.96 * sqrt(lvar)),
+    FR_high      = exp(lmu + 1.96 * sqrt(lvar)),
+    stringsAsFactors = FALSE
+  )
+}))
+band_summary$age_band <- factor(band_summary$age_band,
+                                 levels = names(band_midpoints))
+
+# -----------------------------------------------------------------------------
+# Force FR_mean = 1.000 exactly for the 25-29 reference band.
+#
+# Why: PSA draws use exp(NORM.INV(RAND(), mu, sigma)), so the mean of those
+# draws = exp(mu + 0.5*sigma^2). For the deterministic base case (FR_mean)
+# to equal the mean of the PSA draws we need:
+#   exp(mu + 0.5*sigma^2) = 1  =>  mu = -0.5*sigma^2
+#
+# The decay curve anchors at age 27 giving log_mu = 0, but
+# exp(0 + 0.5*s^2) = 1.0024 != 1. Back-calculating mu closes this exactly.
+# -----------------------------------------------------------------------------
+band_summary$logFR_mean[1] <- -0.5 * band_summary$logFR_var[1]
+band_summary$FR_mean[1]    <- exp(band_summary$logFR_mean[1] +
+                                   0.5 * band_summary$logFR_var[1])  # = 1.000 exactly
+band_summary$FR_low[1]     <- exp(band_summary$logFR_mean[1] -
+                                   1.96 * sqrt(band_summary$logFR_var[1]))
+band_summary$FR_high[1]    <- exp(band_summary$logFR_mean[1] +
+                                   1.96 * sqrt(band_summary$logFR_var[1]))
+
+cat("\n=== Markov Model Age Bands (25-50 population) ===\n")
+print(band_summary[, c("age_band", "midpoint_age", "FR_mean", "FR_low", "FR_high")],
+      row.names = FALSE)
+
+#=============================================================================
+# STEP 8: Standardize so 25-29 = 1.00 (for Table in manuscript)
+#=============================================================================
+# FR_mean for 25-29 is now exactly 1.000 by construction above,
+
+standardization_factor_bands <- 1 / band_summary$FR_mean[1]   # = 1.000 exactly
+
+standardized_bands <- band_summary
+standardized_bands$FR_mean <- band_summary$FR_mean * standardization_factor_bands
+standardized_bands$FR_low  <- band_summary$FR_low  * standardization_factor_bands
+standardized_bands$FR_high <- band_summary$FR_high * standardization_factor_bands
+
+cat("\n=== Standardized FR (25-29 = 1.00) for Manuscript Table ===\n")
+cat("Standardization factor:", round(standardization_factor_bands, 6),
+    "(should be exactly 1)\n\n")
+
+table_output <- standardized_bands[, c("age_band", "midpoint_age", "FR_mean", "FR_low", "FR_high")]
+table_output$FR_mean <- round(table_output$FR_mean, 3)
+table_output$FR_low <- round(table_output$FR_low, 3)
+table_output$FR_high <- round(table_output$FR_high, 3)
+
+print(table_output, row.names = FALSE)
+
+#=============================================================================
+# STEP 9: PSA Parameters (log-normal distributions)
+#=============================================================================
+
+psa_params <- pred_dat[pred_dat$age %in% c(27, 32, 37, 42, 47), 
+                       c("age", "logFR_mean", "logFR_se")]
+psa_params$distribution <- "lognormal"
+psa_params$mu <- psa_params$logFR_mean
+psa_params$sigma <- psa_params$logFR_se
+
+cat("\n=== PSA Parameters (for log-normal distribution) ===\n")
+print(psa_params[, c("age", "mu", "sigma")], row.names = FALSE)
+
+#=============================================================================
+# STEP 10: Plot results
+#=============================================================================
+
+plot(pred_dat$age, pred_dat$FR_mean, type = "l", lwd = 2,
+     ylim = c(0, max(pred_dat$FR_high, na.rm = TRUE) * 1.1),
+     xlab = "Age", ylab = "Fecundability Ratio (FR)",
+     main = paste("Fecundability Decline with Age\n",
+                  "(Baseline: Age 27 = 1.00)"))
+
+# Add confidence interval
+polygon(c(pred_dat$age, rev(pred_dat$age)),
+        c(pred_dat$FR_low, rev(pred_dat$FR_high)),
+        col = rgb(0, 0, 1, 0.2), border = NA)
+
+# Add Rothman data points (standardized)
+points(rothman_std$age_mid, rothman_std$FR_std, 
+       col = "red", pch = 16, cex = 1.5)
+
+# Add reference lines
+abline(v = 27, lty = 2, col = "gray")
+abline(h = 1, lty = 3, col = "gray")
+abline(v = c(30, 35, 40, 45, 50), lty = 3, col = "lightgray")
+
+legend("topright", 
+       legend = c("Exponential decay", "Rothman data (standardized)", 
+                  "95% CI", "Baseline age 27"),
+       col = c("black", "red", rgb(0, 0, 1, 0.2), "gray"),
+       lty = c(1, NA, 1, 2), lwd = c(2, NA, 10, 1),
+       pch = c(NA, 16, 15, NA),
+       bg = "white")
+
+print(band_summary)
+
+
+# Note on log-scale mu:
+
+# standardization_factor_bands corrects only the *original-scale* FR_mean for the Jensen's inequality term (0.5 * sigma^2); it must NOT be added on the log scale,or it would shift mu away from 0 for the reference band.
+
+appendix_table <- data.frame(
+  Age_group    = as.character(standardized_bands$age_band),
+  FR_mean      = round(standardized_bands$FR_mean, 3),
+  FR_SD        = round(band_summary$FR_sd * standardization_factor_bands, 3),
+  Distribution = "Log-normal",
+  Log_mu       = round(band_summary$logFR_mean, 3),
+  Log_sigma    = round(sqrt(band_summary$logFR_var), 3),
+  stringsAsFactors = FALSE
+)
+
+# Create formatted appendix table
+ft_appendix <- flextable(appendix_table) %>%
+  set_header_labels(
+    Age_group    = "Age group",
+    FR_mean      = "FR mean",
+    FR_SD        = "FR SD",
+    Distribution = "Distribution",
+    Log_mu       = "Log-scale mu",
+    Log_sigma    = "Log-scale sigma"
+  ) %>%
+  set_caption(caption = "Supplementary Table S1. Fecundity ratio parameters for probabilistic sensitivity analysis") %>%
+  theme_vanilla() %>%
+  autofit()
+
+# Save as Word documents
+save_as_docx(ft_appendix, 
+             path = "Appendix_Table_Fecundity_PSA.docx")
+```
+
+```{r}
+#TASK 2: IMPUTATION FOR UP OUTCOME PROBABILITIES, ALPHA AND BETA.
+# UP Outcome conditional probabilities. Here, we do not have proportions of UP outcomes for age 45-49, but we do have from age 25-44. I will use PMM to find the values for age 45-49 and thereafter calculate conditional probabilities for each UP outcome (live birth, Abortion, Miscarriage, ectopic pregnancy) i.e the probability of each outcome conditional upon transition into the UP state. 
+
+#source: 
+#Cost of unintended pregnancy in Norway: a role for long-acting reversible contraception by Henry et al
+#Detecting and Dating Early Non‐live Pregnancy Outcomes: Generation of a Novel Pregnancy Algorithm From Norwegian Linked Health Registries DOI: 10.1002/pds.70002 
+
+library(dplyr)
+library(mice)      # For multiple imputation
+library(MCMCpack)  # For rdirichlet function
+
+# STEP 1: Source data with updated age groups (starting at 25)
+#=============================================================================
+
+henry_data <- data.frame(
+  age_group = c("25-29", "30-34", "35-39", "40-44", "45-50"),
+  age_midpoint = c(27, 32.5, 37.5, 42.5, 47.5),
+  live_birth = c(0.25, 0.30, 0.45, 0.50, NA),  # 25-29 assumed 0.25 based on Henry Table 1 (20-24:0.45, 25-29:0.25)
+  abortion = c(0.96, 0.96, 0.98, 0.98, NA)     # 25-29 assumed 0.96 based on Henry Table 1
+)
+
+print(henry_data)
+
+#===========================================================================
+# STEP 2: Impute missing values for age 45-49 using PMM
+#===========================================================================
+
+set.seed(123)  # For reproducible results
+
+# Create a copy for imputation
+impute_data <- henry_data[, c("age_midpoint", "live_birth", "abortion")]
+
+# Run multiple imputation for age 45-50
+cat("\nRunning multiple imputation for age 45-50...\n")
+imp <- mice(impute_data, 
+            m = 5,           # Create 5 imputed datasets
+            maxit = 10,      # Run 10 iterations
+            method = "pmm",  # Predictive Mean Matching
+            print = FALSE)   # Suppress output
+
+# Extract and pool the imputed values
+imputed_sets <- complete(imp, "long")
+
+# Filter for age 45-49 and calculate averages
+age_45_imputed <- imputed_sets %>%
+  filter(age_midpoint == 47.5) %>%
+  group_by(.imp) %>%
+  summarise(
+    live_birth_imp = mean(live_birth),
+    abortion_imp = mean(abortion)
+  )
+
+# Calculate pooled estimates
+pooled_live <- mean(age_45_imputed$live_birth_imp)
+pooled_abortion <- mean(age_45_imputed$abortion_imp)
+
+# Update the original data with imputed values
+henry_data$live_birth[5] <- round(pooled_live, 2)
+henry_data$abortion[5] <- round(pooled_abortion, 2)
+
+cat("\nImputation results for age 45-49:\n")
+cat("Live birth proportion unintended:", henry_data$live_birth[5], "\n")
+cat("Abortion proportion unintended:", henry_data$abortion[5], "\n")
+
+#=============================================================================
+# STEP 3: Pregnancy outcome distribution from Norwegian registry study
+#===========================================================================
+
+# Data from Nordeng et al. (2024) - UiO pregnancy algorithm
+# Overall distribution of pregnancy outcomes in Norway 2008-2018
+norway_pregnancy_dist <- data.frame(
+  outcome = c("live_birth", "miscarriage", "abortion", "ectopic"),
+  proportion = c(0.748, 0.131, 0.110, 0.007)  # From paper: 74.8%, 13.1%, 11.0%, 0.7%
+)
+
+print(norway_pregnancy_dist)
+
+#=============================================================================
+# STEP 4: Function to calculate conditional probabilities for one age group
+#=============================================================================
+
+calculate_age_probabilities <- function(live_prop, abort_prop) {
+  
+  # Step 1: Multiply each outcome by its "proportion unintended"
+  # Miscarriage and ectopic use 0.5 (Henry's assumption, also used in Nordeng et al.)
+  numerators <- c(
+    live_birth = norway_pregnancy_dist$proportion[1] * live_prop,
+    abortion = norway_pregnancy_dist$proportion[3] * abort_prop,
+    miscarriage = norway_pregnancy_dist$proportion[2] * 0.5,
+    ectopic = norway_pregnancy_dist$proportion[4] * 0.5
+  )
+  
+  # Step 2: Calculate sum for normalization
+  total <- sum(numerators)
+  
+  # Step 3: Divide each by total to get probabilities (sum to 1)
+  probabilities <- numerators / total
+  
+  # Step 4: Convert to percentages
+  percentages <- round(probabilities * 100, 1)
+  
+  return(list(probabilities = probabilities, 
+              percentages = percentages,
+              total = total))
+}
+
+#===========================================================================
+# STEP 5: Calculate for each age group
+#===========================================================================
+
+results <- list()
+for (i in 1:nrow(henry_data)) {
+  age_group <- henry_data$age_group[i]
+  results[[age_group]] <- calculate_age_probabilities(
+    henry_data$live_birth[i], 
+    henry_data$abortion[i]
+  )
+}
+
+# Build the final table
+final_table <- data.frame(
+  age_group = henry_data$age_group,
+  live_birth_unintended = henry_data$live_birth,
+  abortion_unintended = henry_data$abortion,
+  live_birth_pct = sapply(henry_data$age_group, 
+                          function(x) results[[x]]$percentages[1]),
+  abortion_pct = sapply(henry_data$age_group, 
+                        function(x) results[[x]]$percentages[2]),
+  miscarriage_pct = sapply(henry_data$age_group, 
+                           function(x) results[[x]]$percentages[3]),
+  ectopic_pct = sapply(henry_data$age_group, 
+                       function(x) results[[x]]$percentages[4])
+)
+
+# Add a check column (should sum to ~100%)
+final_table$check_sum <- rowSums(final_table[, 4:7])
+
+cat("\n======================================================================\n")
+cat("FINAL RESULTS: Conditional Probabilities (%)\n")
+cat("(Given that an unintended pregnancy has occurred)\n")
+cat("======================================================================\n\n")
+print(final_table)
+
+#===========================================================================
+# STEP 6: Calculate Alpha and Beta parameters for Dirichlet distribution
+#===========================================================================
+
+# Extract probabilities as decimals.
+# we use unrounded probabilities from results list — NOT the rounded percentagesmin final_table — to avoid accumulating rounding error in model parameters.
+probs_data <- data.frame(
+  age_group     = henry_data$age_group,
+  p_live        = sapply(henry_data$age_group, function(x) results[[x]]$probabilities[1]),
+  p_abortion    = sapply(henry_data$age_group, function(x) results[[x]]$probabilities[2]),
+  p_miscarriage = sapply(henry_data$age_group, function(x) results[[x]]$probabilities[3]),
+  p_ectopic     = sapply(henry_data$age_group, function(x) results[[x]]$probabilities[4])
+)
+
+# Verify each row sums to 1 (should be exact, not 99.9/100.1)
+probs_data$check_sum <- rowSums(probs_data[, 2:5])
+cat("\nProbability check (should be exactly 1.00):\n")
+print(probs_data[, c("age_group", "check_sum")])
+
+# -----------------------------------------------------------------------------
+# Dirichlet alpha parameters — based on actual Nordeng et al. registry counts
+# -----------------------------------------------------------------------------
+
+nordeng_counts <- c(
+  live_birth   = 642712,
+  abortion     = 94664,
+  miscarriage  = 112257,
+  ectopic      = 6429
+)
+nordeng_total <- sum(nordeng_counts)
+cat("\nNordeng et al. registry counts (Dirichlet prior):\n")
+print(nordeng_counts)
+cat("Total:", nordeng_total, "\n")
+
+# Scale alpha parameters: for each age group, scale the Nordeng counts
+# by the age-specific conditional probabilities. This preserves the registry
+# precision while incorporating age-specific unintendedness from Henry et al.
+alpha_table <- probs_data %>%
+  mutate(
+    alpha_live        = p_live        * nordeng_total,
+    alpha_abortion    = p_abortion    * nordeng_total,
+    alpha_miscarriage = p_miscarriage * nordeng_total,
+    alpha_ectopic     = p_ectopic     * nordeng_total
+  )
+
+cat("\nAlpha parameters (Dirichlet, scaled from Nordeng registry N =",
+    nordeng_total, "):\n")
+print(alpha_table[, c("age_group", "alpha_live", "alpha_abortion",
+                      "alpha_miscarriage", "alpha_ectopic")])
+
+#=============================================================================
+# STEP 7: Calculate 95% Confidence Intervals (Marginal Beta distributions)
+#=============================================================================
+# N = nordeng_total (855,062) — consistent with Dirichlet alpha parameters 
+
+calculate_beta_ci <- function(p, N = nordeng_total) {
+  alpha <- p * N
+  beta  <- (1 - p) * N
+  lower <- qbeta(0.025, alpha, beta)
+  upper <- qbeta(0.975, alpha, beta)
+  return(list(lower = lower, upper = upper, alpha = alpha, beta = beta))
+}
+
+# Calculate for each probability
+ci_results <- list()
+for(i in 1:nrow(probs_data)) {
+  age <- probs_data$age_group[i]
+
+  ci_live        <- calculate_beta_ci(probs_data$p_live[i])
+  ci_abortion    <- calculate_beta_ci(probs_data$p_abortion[i])
+  ci_miscarriage <- calculate_beta_ci(probs_data$p_miscarriage[i])
+  ci_ectopic     <- calculate_beta_ci(probs_data$p_ectopic[i])
+  
+  ci_results[[age]] <- data.frame(
+    outcome = c("live", "abortion", "miscarriage", "ectopic"),
+    probability = c(probs_data$p_live[i], probs_data$p_abortion[i],
+                    probs_data$p_miscarriage[i], probs_data$p_ectopic[i]),
+    alpha = c(ci_live$alpha, ci_abortion$alpha, ci_miscarriage$alpha, ci_ectopic$alpha),
+    beta = c(ci_live$beta, ci_abortion$beta, ci_miscarriage$beta, ci_ectopic$beta),
+    ci_lower = c(ci_live$lower, ci_abortion$lower, ci_miscarriage$lower, ci_ectopic$lower),
+    ci_upper = c(ci_live$upper, ci_abortion$upper, ci_miscarriage$upper, ci_ectopic$upper)
+  )
+}
+
+cat("\n95% Confidence Intervals (Marginal Beta distributions):\n")
+for(age in names(ci_results)) {
+  cat(paste("\nAge", age, ":\n"))
+  print(ci_results[[age]])
+}
+
+#=============================================================================
+# STEP 8: Generate Dirichlet samples for Probabilistic Sensitivity Analysis
+#=============================================================================
+
+set.seed(123)  # For reproducibility
+
+# Function to generate Dirichlet samples for one age group
+generate_dirichlet_psa <- function(alphas, n_samples = 1000) {
+  # alphas: vector of 4 concentration parameters
+  samples <- rdirichlet(n_samples, alphas)
+  colnames(samples) <- c("live", "abortion", "miscarriage", "ectopic")
+  return(samples)
+}
+
+# Generate PSA samples for each age group
+psa_samples <- list()
+n_psa <- 1000  # Number of PSA iterations
+
+for(i in 1:nrow(alpha_table)) {
+  age <- alpha_table$age_group[i]
+  
+  # Get the 4 alpha parameters for this age group
+  alphas <- c(alpha_table$alpha_live[i],
+              alpha_table$alpha_abortion[i],
+              alpha_table$alpha_miscarriage[i],
+              alpha_table$alpha_ectopic[i])
+  
+  # Generate Dirichlet samples
+  samples <- generate_dirichlet_psa(alphas, n_psa)
+  psa_samples[[age]] <- samples
+  
+  # Check: mean should be close to original probabilities
+  cat(paste("\nAge", age, "- PSA validation:\n"))
+  cat(sprintf("  Original: Live=%.3f, Ab=%.3f, Misc=%.3f, Ect=%.3f\n",
+              probs_data$p_live[i], probs_data$p_abortion[i],
+              probs_data$p_miscarriage[i], probs_data$p_ectopic[i]))
+  cat(sprintf("  PSA mean: Live=%.3f, Ab=%.3f, Misc=%.3f, Ect=%.3f\n",
+              mean(samples[,1]), mean(samples[,2]),
+              mean(samples[,3]), mean(samples[,4])))
+  cat(sprintf("  Sum to 1? %s (min=%.4f, max=%.4f)\n",
+              all(round(rowSums(samples), 10) == 1),
+              min(rowSums(samples)), max(rowSums(samples))))
+}
+
+#=============================================================================
+# STEP 9: Create final PSA parameter table
+#=============================================================================
+
+final_psa_table <- data.frame()
+
+for(age in names(ci_results)) {
+  age_data <- ci_results[[age]]
+  
+  for(j in 1:nrow(age_data)) {
+    row <- data.frame(
+      age_group = age,
+      outcome = age_data$outcome[j],
+      probability = round(age_data$probability[j], 4),
+      alpha = round(age_data$alpha[j], 1),
+      beta = round(age_data$beta[j], 1),
+      ci_95 = sprintf("(%.4f, %.4f)", age_data$ci_lower[j], age_data$ci_upper[j])
+    )
+    final_psa_table <- rbind(final_psa_table, row)
+  }
+}
+
+cat("\n======================================================================\n")
+cat("FINAL PSA PARAMETERS FOR MARKOV MODEL\n")
+cat("Age groups: 25-29, 30-34, 35-39, 40-44, 45-49\n")
+cat("======================================================================\n\n")
+print(final_psa_table)
+
+#=============================================================================
+# STEP 10: Export tables for manuscript
+#=============================================================================
+
+# Create manuscript table (simplified) — use unrounded probabilities,
+# format percentages for display only here
+manuscript_up_table <- data.frame(
+  `Age group`          = final_table$age_group,
+  `Live birth (%)`     = round(probs_data$p_live        * 100, 1),
+  `Induced abortion (%)` = round(probs_data$p_abortion  * 100, 1),
+  `Miscarriage (%)`    = round(probs_data$p_miscarriage  * 100, 1),
+  `Ectopic (%)`        = round(probs_data$p_ectopic      * 100, 1),
+  check.names = FALSE
+)
+
+# Word document table
+ft_up_probs <- flextable(manuscript_up_table) |>
+  set_caption("Table 2. Conditional probabilities of unintended pregnancy outcomes by age group (%)") |>
+  bold(part = "header") |>
+  fontsize(size = 10, part = "all") |>
+  font(fontname = "Times New Roman", part = "all") |>
+  align(align = "center", part = "header") |>
+  align(align = "left",   j = 1, part = "body") |>
+  align(align = "center", j = -1, part = "body") |>
+  bg(bg = "#1B3A6B", part = "header") |>
+  color(color = "white", part = "header") |>
+  border_outer(part = "all") |>
+  border_inner_h(part = "body") |>
+  autofit()
+
+save_as_docx(ft_up_probs,
+             path = "Table2_UP_Conditional_Probabilities.docx")
+cat("Table 2 saved as Table2_UP_Conditional_Probabilities.docx\n")
+
+# Save full PSA parameters as CSV (for record)
+write.csv(final_psa_table,
+          file = "Appendix_UP_PSA_Parameters.csv",
+          row.names = FALSE)
+cat("PSA parameters saved as Appendix_UP_PSA_Parameters.csv\n")
+```
+
+---
+
+# 1. Libraries
+
+```{r libraries}
+library(dampack)   # ICER tables, CEAC, tornado diagrams
+library(ggplot2)   # plotting
+library(dplyr)     # data wrangling
+library(knitr)     # table formatting
+library(kableExtra)# styled tables
+library(flextable)
+library(officer)
+```
+
+---
+
+# 2. Core Model Parameters
+
+## 2.1 Model Structure
+
+```{r params_structure}
+n_cohort     <- 1000   # hypothetical cohort size
+n_cycles     <- 25     # maximum cycles (years); age 25 -> 50
+cycle_length <- 1      # 1-year cycle length
+```
+
+---
+
+## 2.2 Age Groups & Cohort Distribution
+
+```{r params_age}
+# 5-year age bands; registry-derived proportions (Helsedirektoratet 2023)
+age_groups <- data.frame(
+  group      = c("25-29", "30-34", "35-39", "40-44", "45-50"),
+  midpoint   = c(27,       32,      37,      42,      47),
+  prop       = c(0.107,    0.294,   0.392,   0.170,   0.037),
+  n          = c(107,      294,     392,     170,     37),
+  horizon    = c(23,       18,      13,      8,       3),   # years to age 50
+  disc_rate  = c(0.04,     0.04,    0.04,    0.03,    0.03) # NoMA: 4% <40, 3% >=40
+)
+
+kable(age_groups, caption = "Table: Cohort age group distribution") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+## 2.3 Transition Probabilities
+
+```{r params_probs}
+# --- Failure rates (annual, base case) ---
+p_fail_fembloc <- 9 / 207        # 0.0435 | conservative: detected UPs / confirmed occlusions [5]
+p_fail_tl      <- 0.0264         # US Medicaid cohort [Schwarz et al., 4]
+
+# --- Decision tree: FemBloc confirmation test (FemChec at 12 weeks) ---
+p_confirmed   <- 207 / 228       # 0.908 | completed FemChec -> enter PC state [5]
+p_unconfirmed <- 1 - p_confirmed # 0.092 | failed confirmation -> enter UP state immediately
+
+cat("FemBloc annual fail rate:    ", round(p_fail_fembloc, 4), "\n")
+cat("TL annual fail rate:         ", round(p_fail_tl, 4), "\n")
+cat("FemBloc confirmation rate:   ", round(p_confirmed, 4), "\n")
+cat("FemBloc no-confirmation rate:", round(p_unconfirmed, 4), "\n")
+```
+
+---
+## 2.4 Fecundity Ratios
+
+```{r params_fecundity}
+# Exponential decay anchored at 25-29 = 1.00 | Rothman et al. [13]
+# Decay rate: 2.765% per year | FR >= 40 extrapolated
+# Distribution: log-normal for PSA
+
+fr <- data.frame(
+  group     = c("25-29", "30-34", "35-39", "40-44", "45-50"),
+  fr_mean   = c(1.000,   0.8740016,   0.7625570,   0.6656329,   0.5812991),
+  fr_sd     = c(0.06651832,   0.07696094,   0.08372964,   0.08761302,   0.08925198),
+  log_mu    = c(-0.002,  -0.138535,  -0.2770701,  -0.4156051,  -0.5541401),
+  log_sigma = c(0.06629937,   0.08788585,   0.10947234,   0.13105882,   0.15264531)
+)
+
+kable(fr, caption = "Table 1: Age-specific fecundity ratios (log-normal distribution)") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+## 2.5 Utility Values
+
+```{r params_utilities}
+# --- Health state utilities ---
+u_pc  <- 0.8136  # Permanent contraception state | avg Norwegian EQ-5D-5L, women 18-49 [15]
+u_up  <- 0.489  # Unintended pregnancy state | Schwartz et al. [16]
+
+# --- AE disutilities (applied in cycle 1 only; AEs resolve within 3 months) ---
+u_ae_fembloc <- 0.002627013   # calculated: sum(p_ae * disutility_weight) for FemBloc AEs
+u_ae_tl      <- 0.000410507   # calculated: sum(p_ae * disutility_weight) for TL AEs
+
+# 1. PC STATE UTILITY
+# Norwegian EQ-5D-5L population norms, weighted average of 3 age groups [15]
+# -----------------------------------------------------------------------------
+u_pc_data <- data.frame(
+  age_group = c("18-29", "30-39", "40-49"),
+  n         = c(317,     272,     272),
+  mean      = c(0.825,   0.828,   0.786),
+  sd        = c(0.211,   0.208,   0.223)
+)
+
+# Weighted mean
+total_n    <- sum(u_pc_data$n)
+u_pc_mean  <- sum(u_pc_data$n * u_pc_data$mean) / total_n
+
+# Pooled variance and SD
+var_pooled <- sum(u_pc_data$n * (u_pc_data$sd^2 + u_pc_data$mean^2)) /
+              total_n - u_pc_mean^2
+sd_pooled  <- sqrt(var_pooled)
+
+# SE of weighted mean
+se_u_pc <- sd_pooled / sqrt(total_n)
+
+# Beta parameters via method of moments
+var_u_pc   <- se_u_pc^2
+kappa_pc   <- (u_pc_mean * (1 - u_pc_mean) / var_u_pc) - 1
+alpha_u_pc <- u_pc_mean * kappa_pc
+beta_u_pc  <- (1 - u_pc_mean) * kappa_pc
+
+cat("=== PC STATE UTILITY ===\n")
+cat("Weighted mean:  ", round(u_pc_mean,  4), "\n")
+cat("Pooled SD:      ", round(sd_pooled,  4), "\n")
+cat("SE:             ", round(se_u_pc,    6), "\n")
+cat("Alpha:          ", round(alpha_u_pc, 2), "\n")
+cat("Beta:           ", round(beta_u_pc,  2), "\n")
+cat("95% CI: [",
+    round(qbeta(0.025, alpha_u_pc, beta_u_pc), 4), ",",
+    round(qbeta(0.975, alpha_u_pc, beta_u_pc), 4), "]\n\n")
+
+# Update u_pc to weighted mean
+u_pc <- u_pc_mean
+
+# -----------------------------------------------------------------------------
+# 2. UP STATE UTILITY
+# Schwartz et al. [16] | mean = 0.489, N = 192
+# SE back-calculated from reported margin of error <= 7% at 95% CI
+# -----------------------------------------------------------------------------
+u_up_mean  <- 0.489
+n_up       <- 192
+me_up      <- 0.07 * u_up_mean     # 7% margin of error
+se_u_up    <- me_up / 1.96         # back-calculate SE
+
+# Beta parameters via method of moments
+var_u_up   <- se_u_up^2
+kappa_up   <- (u_up_mean * (1 - u_up_mean) / var_u_up) - 1
+alpha_u_up <- u_up_mean * kappa_up
+beta_u_up  <- (1 - u_up_mean) * kappa_up
+
+cat("=== UP STATE UTILITY ===\n")
+cat("Mean:           ", round(u_up_mean,  4), "\n")
+cat("Margin of error:", round(me_up,      4), "\n")
+cat("SE:             ", round(se_u_up,    6), "\n")
+cat("Alpha:          ", round(alpha_u_up, 2), "\n")
+cat("Beta:           ", round(beta_u_up,  2), "\n")
+cat("95% CI: [",
+    round(qbeta(0.025, alpha_u_up, beta_u_up), 4), ",",
+    round(qbeta(0.975, alpha_u_up, beta_u_up), 4), "]\n\n")
+
+# Update u_up
+u_up <- u_up_mean
+
+# -----------------------------------------------------------------------------
+# 3. SUMMARY TABLE
+# -----------------------------------------------------------------------------
+utility_params <- data.frame(
+  Parameter    = c("u_pc (PC state)", "u_up (UP state)"),
+  Mean         = round(c(u_pc_mean,  u_up_mean),  4),
+  SE           = round(c(se_u_pc,    se_u_up),    6),
+  Alpha        = round(c(alpha_u_pc, alpha_u_up), 2),
+  Beta         = round(c(beta_u_pc,  beta_u_up),  2),
+  CI_low       = round(c(qbeta(0.025, alpha_u_pc, beta_u_pc),
+                         qbeta(0.025, alpha_u_up, beta_u_up)), 4),
+  CI_high      = round(c(qbeta(0.975, alpha_u_pc, beta_u_pc),
+                         qbeta(0.975, alpha_u_up, beta_u_up)), 4),
+  Distribution = c("Beta", "Beta")
+)
+
+kable(utility_params,
+      caption = "Utility distribution parameters for PSA") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# Save for use in PSA
+save.image("fembloc_utility_params.RData")
+
+```
+---
+
+## 2.6 Adverse Events
+
+```{r params_ae}
+# --- FemBloc AE rates (from combined trials [5]) ---
+# Only AEs >= 4% prevalence or life-threatening included
+ae_fembloc <- data.frame(
+  event       = c("Vaginal bleeding", "Uterine cramps", "Pelvic pain",
+                  "Nausea", "Uterine perforation"),
+  probability = c(0.5852, 0.1878, 0.3712, 0.0349, 0.0048),
+  cost_nok    = c(3467,   2027,   3467,   2027,   58093)
+)
+
+# --- TL AE rates (published literature [4]) ---
+ae_tl <- data.frame(
+  event       = c("Pelvic inflammatory disease", "Pelvic pain",
+                  "Menstrual bleeding",           "Abdominal pain"),
+  probability = c(0.0170, 0.1941, 0.0487, 0.0393),
+  cost_nok    = c(49291,  3467,   0,      3467)
+  # Menstrual bleeding cost = 0: managed with OTC medication; no DRG code applicable
+)
+
+kable(ae_fembloc, caption = "FemBloc: Adverse event rates and management costs (NOK 2026)") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+kable(ae_tl, caption = "TL: Adverse event rates and management costs (NOK 2026)") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# --- Expected AE cost per arm (sum of p_i * c_i) ---
+ae_cost_fembloc <- sum(ae_fembloc$probability * ae_fembloc$cost_nok)
+ae_cost_tl      <- sum(ae_tl$probability      * ae_tl$cost_nok)
+
+cat("Expected AE cost - FemBloc: NOK", round(ae_cost_fembloc), "\n")
+cat("Expected AE cost - TL:      NOK", round(ae_cost_tl), "\n")
+```
+---
+
+## 2.7 Unit Costs
+
+```{r params_unit_costs}
+# All costs in NOK, 2026 base year
+# DRG tariffs: enhetspriser 2026 base rate 53,345 NOK [20]
+# Resource costs: enhetskostnader v1.6 2026 [20]
+# Medications: Statens legemiddelverk package prices [21]
+
+# --- Specialist time ---
+specialist_nok_per_min <- 19.6  # enhetskostnader 2026
+
+# --- Travel and lost leisure (per visit) ---
+travel_cost_per_visit        <- 864    # enhetskostnader 2026
+lost_leisure_nok_per_hour    <- 328    # enhetskostnader 2026
+
+# --- FemBloc procedure components ---
+fembloc_device_cost    <- 11350  # Essure proxy, CPI-adjusted from USD 2008 [18]
+fembloc_premed_cost    <- 506
+fembloc_postmed_cost   <- 17
+fembloc_ultrasound_cost <- 343   # pre-procedure ultrasound + FemChec HSG
+fembloc_consult_cost   <- 407    # follow-up base consultation fee
+fembloc_visit_time_min <- 83     # total visit time: 1hr 23min [5]
+fembloc_n_visits       <- 2      # procedure visit + FemChec confirmation visit
+fembloc_minor_procedure <- 8855 #DRG813T for minor gynaecologic procedure
+
+fembloc_insertion_fee  <- fembloc_visit_time_min * specialist_nok_per_min + fembloc_minor_procedure
+
+# --- TL procedure components ---
+tl_procedure_cost   <- 35421  # DRG 3610 minor gynaecologic procedure [19]
+tl_premed_cost      <- 1622
+tl_postmed_cost     <- 71
+tl_visit_time_min   <- 44     # surgical duration 24 min + discharge ~20 min [9]
+tl_n_visits         <- 1
+
+# --- UP outcome unit costs ---
+cost_live_birth        <- 45129
+cost_induced_abortion  <- 3574
+cost_miscarriage       <- 3467
+cost_ectopic_pregnancy <- 62520
+```
+
+---
+
+## 2.8 Unintended Pregnancy Outcome Probabilities
+
+```{r params_up_probs}
+# Conditional probabilities: outcome | UP event, by age group (Table 2)
+# Source: national registry [14] adjusted by age-specific unintendedness [3]
+# Age 45-50: imputed via Predictive Mean Matching (PMM)
+
+up_probs <- matrix(c(
+  probs_data$p_live,
+  probs_data$p_abortion,
+  probs_data$p_miscarriage,
+  probs_data$p_ectopic
+), ncol = 4,
+dimnames = list(
+  probs_data$age_group,
+  c("live_birth", "induced_abortion", "miscarriage", "ectopic")
+))
+
+# Verify each row sums to 1 (should be exact — unrounded probabilities used)
+row_sums <- rowSums(up_probs)
+cat("Row sums (should all = 1.000000):\n")
+print(round(row_sums, 6))
+
+kable(up_probs, caption = "Table 2: UP outcome conditional probabilities by age group") |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+```
+
+---
+
+## 2.9 Derived Cost Calculations
+
+```{r params_derived_costs}
+# --- Travel and leisure costs per arm ---
+fembloc_travel_leisure <- (travel_cost_per_visit +
+                           lost_leisure_nok_per_hour * (fembloc_visit_time_min / 60)) +
+                          (travel_cost_per_visit +
+                           lost_leisure_nok_per_hour * (15 / 60))
+
+tl_travel_leisure      <- (travel_cost_per_visit + 
+                           lost_leisure_nok_per_hour * (tl_visit_time_min / 60)
+                           ) * tl_n_visits
+
+# --- Total cycle 0 costs (undiscounted lump sum) ---
+fembloc_cost_cycle0 <- fembloc_device_cost    +
+                       fembloc_premed_cost     +
+                       fembloc_postmed_cost    +
+                       fembloc_insertion_fee   +
+                       fembloc_ultrasound_cost +
+                       fembloc_consult_cost    +
+                       ae_cost_fembloc         +
+                       fembloc_travel_leisure
+
+tl_cost_cycle0      <- tl_procedure_cost  +
+                       tl_premed_cost     +
+                       tl_postmed_cost    +
+                       ae_cost_tl         +
+                       tl_travel_leisure
+
+# --- UP state cost per age group: sum(p_outcome * c_outcome) ---
+outcome_costs <- c(cost_live_birth, cost_induced_abortion,
+                   cost_miscarriage, cost_ectopic_pregnancy)
+
+up_state_cost_by_age <- as.vector(up_probs %*% outcome_costs)
+names(up_state_cost_by_age) <- rownames(up_probs)
+
+# --- Summary ---
+cat("====== CYCLE 0 COSTS (NOK 2026) ======\n")
+cat("FemBloc total:  NOK", round(fembloc_cost_cycle0), "\n")
+cat("TL total:       NOK", round(tl_cost_cycle0), "\n")
+cat("Difference:     NOK", round(fembloc_cost_cycle0 - tl_cost_cycle0), "\n\n")
+
+cat("====== UP STATE COST BY AGE GROUP ======\n")
+print(round(up_state_cost_by_age))
+```
+
+# =============================================================================
+# MARKOV LOOP
+# =============================================================================
+
+```{r}
+# -----------------------------------------------------------------------------
+# Fecundity ratio for a given age (maps to 5-year band)
+# -----------------------------------------------------------------------------
+get_fr <- function(age) {
+  if      (age < 30) fr$fr_mean[fr$group == "25-29"]
+  else if (age < 35) fr$fr_mean[fr$group == "30-34"]
+  else if (age < 40) fr$fr_mean[fr$group == "35-39"]
+  else if (age < 45) fr$fr_mean[fr$group == "40-44"]
+  else               fr$fr_mean[fr$group == "45-50"]
+}
+
+# -----------------------------------------------------------------------------
+# UP state cost for a given age (maps to 5-year band)
+# -----------------------------------------------------------------------------
+get_up_cost <- function(age) {
+  if      (age < 30) up_state_cost_by_age["25-29"]
+  else if (age < 35) up_state_cost_by_age["30-34"]
+  else if (age < 40) up_state_cost_by_age["35-39"]
+  else if (age < 45) up_state_cost_by_age["40-44"]
+  else               up_state_cost_by_age["45-50"]
+}
+
+# -----------------------------------------------------------------------------
+# CORE FUNCTION: run Markov model for one age group, one arm
+# Returns vectors of discounted costs and QALYs per cycle
+# -----------------------------------------------------------------------------
+run_markov <- function(arm, ag) {
+  
+  horizon   <- ag$horizon       # years to age 50
+  mid_age   <- ag$midpoint      # starting age (midpoint of band)
+  disc_r    <- ag$disc_rate     # discount rate (4% or 3%)
+  
+  # --- Procedure cost: applied at cycle 0, undiscounted ---
+  proc_cost <- if (arm == "fembloc") fembloc_cost_cycle0 else tl_cost_cycle0
+  
+  # --- Starting state proportions (post decision tree) ---
+  # FemBloc: unconfirmed women (9.2%) enter UP immediately for 1 cycle
+  # TL:      all women enter PC
+ if (arm == "fembloc") {
+    fr_cycle1  <- get_fr(mid_age)
+    prop_pc    <- p_confirmed
+    prop_up    <- p_unconfirmed * fr_cycle1  # fecundity decay applied to unconfirmed
+    prop_pc    <- prop_pc + (p_unconfirmed * (1 - fr_cycle1))  # remainder stay in PC
+  } else {
+    prop_pc <- 1.0
+    prop_up <- 0.0
+  }
+  
+  # --- Storage ---
+  costs  <- numeric(horizon)
+  qalys  <- numeric(horizon)
+  up_vec <- numeric(horizon)   # track UP proportions for validation
+  
+  for (cycle in 1:horizon) {
+    
+    # Current age this cycle (midpoint age + cycles elapsed)
+    current_age <- mid_age + (cycle - 1)
+    
+    # Fecundity ratio updates every 5 years as cohort ages through bands
+    fr_current <- get_fr(current_age)
+    
+    # Age-adjusted failure rate
+    p_fail     <- if (arm == "fembloc") p_fail_fembloc else p_fail_tl
+    p_fail_adj <- p_fail * fr_current
+    
+    # UP state cost for current age band
+    up_cost_current <- get_up_cost(current_age)
+    
+    # --- Discount factor ---
+    disc_factor <- 1 / (1 + disc_r)^cycle
+    
+    # --- Half-cycle correction ---
+    # Applied at cycle 1 and final cycle (0.5), all others = 1.0
+    hcc <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+    
+    # --- Utilities this cycle ---
+    # AE disutility applied in cycle 1 only (resolves within 3 months)
+    u_pc_cycle <- if (cycle == 1) {
+      u_pc - if (arm == "fembloc") u_ae_fembloc else u_ae_tl
+    } else {
+      u_pc
+    }
+    
+    # --- QALYs (discounted + half-cycle corrected) ---
+    qaly_cycle    <- (prop_pc * u_pc_cycle + prop_up * u_up) * hcc * disc_factor
+    qalys[cycle]  <- qaly_cycle
+    
+    # --- Costs (discounted) ---
+    # Procedure cost added outside loop (cycle 0, undiscounted)
+    # UP state cost applied per cycle spent in UP state
+    cost_cycle   <- (prop_up * up_cost_current) * disc_factor
+    costs[cycle] <- cost_cycle
+    
+    # --- Store UP proportion for validation ---
+    up_vec[cycle] <- prop_up
+    
+    # --- Transition to next cycle ---
+    # PC -> UP with adjusted failure rate
+    # PC -> PC with (1 - adjusted failure rate)
+    # UP -> PC after 1 cycle (all women return)
+    new_up   <- prop_pc * p_fail_adj
+    new_pc   <- prop_pc * (1 - p_fail_adj) + prop_up  # UP returns to PC
+    
+    prop_pc  <- new_pc
+    prop_up  <- new_up
+  }
+  
+  list(
+    arm        = arm,
+    group      = ag$group,
+    total_cost = proc_cost + sum(costs),   # cycle 0 + discounted state costs
+    total_qaly = sum(qalys),
+    cost_vec   = costs,
+    qaly_vec   = qalys,
+    up_vec     = up_vec                    # for validation
+  )
+}
+
+# -----------------------------------------------------------------------------
+# RUN ALL AGE GROUPS, BOTH ARMS
+# -----------------------------------------------------------------------------
+results_fembloc <- lapply(1:nrow(age_groups), function(i) 
+  run_markov("fembloc", age_groups[i, ]))
+
+results_tl <- lapply(1:nrow(age_groups), function(i) 
+  run_markov("tl", age_groups[i, ]))
+
+# Name lists for easy reference
+names(results_fembloc) <- age_groups$group
+names(results_tl)      <- age_groups$group
+
+# -----------------------------------------------------------------------------
+# AGGREGATE ACROSS AGE GROUPS (weighted by cohort proportions)
+# -----------------------------------------------------------------------------
+agg_cost_fembloc <- sum(sapply(1:nrow(age_groups), function(i)
+  results_fembloc[[i]]$total_cost * age_groups$prop[i]))
+
+agg_qaly_fembloc <- sum(sapply(1:nrow(age_groups), function(i)
+  results_fembloc[[i]]$total_qaly * age_groups$prop[i]))
+
+agg_cost_tl <- sum(sapply(1:nrow(age_groups), function(i)
+  results_tl[[i]]$total_cost * age_groups$prop[i]))
+
+agg_qaly_tl <- sum(sapply(1:nrow(age_groups), function(i)
+  results_tl[[i]]$total_qaly * age_groups$prop[i]))
+
+# -----------------------------------------------------------------------------
+# INCREMENTAL RESULTS & ICER
+# -----------------------------------------------------------------------------
+inc_cost <- agg_cost_fembloc - agg_cost_tl
+inc_qaly <- agg_qaly_fembloc - agg_qaly_tl
+icer_qaly <- inc_cost / inc_qaly
+
+up_fembloc <- sum(sapply(1:nrow(age_groups), function(i)
+  sum(results_fembloc[[i]]$up_vec) * age_groups$prop[i]))
+
+up_tl <- sum(sapply(1:nrow(age_groups), function(i)
+  sum(results_tl[[i]]$up_vec) * age_groups$prop[i]))
+
+inc_up_markov <- up_fembloc - up_tl
+icer_up       <- inc_cost / inc_up_markov # NOK per UP avoided (per average woman scale)
+
+# -----------------------------------------------------------------------------
+# SUMMARY TABLE
+# -----------------------------------------------------------------------------
+base_case_summary <- data.frame(
+  Strategy      = c("FemBloc", "Tubal Ligation", "Incremental"),
+  Total_Cost    = round(c(agg_cost_fembloc, agg_cost_tl, inc_cost), 0),
+  Total_QALYs   = round(c(agg_qaly_fembloc, agg_qaly_tl, inc_qaly), 4),
+  UPs = round(c(up_fembloc, up_tl, -(up_fembloc - up_tl)), 1),
+  ICER_per_QALY = c(NA, NA, round(icer_qaly, 0)),
+  ICER_per_UP   = c(NA, NA, round(icer_up, 0))
+)
+
+cat("==================== BASE CASE RESULTS ====================\n")
+print(base_case_summary)
+cat("\nICER (NOK per QALY gained):        ", round(icer_qaly, 0), "\n")
+cat("ICER (NOK per UP avoided):         ", round(icer_up, 0), "\n")
+
+kable(base_case_summary,
+      caption = "Base Case Cost-Effectiveness Results (NOK 2026)",
+      col.names = c("Strategy", "Total Cost (NOK)",
+                    "Total QALYs", "UPs", 
+                    "ICER/QALY (NOK)", "ICER/UP avoided (NOK)")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+# -----------------------------------------------------------------------------
+# VALIDATION: UP proportions per cycle (age group 35-39, largest share)
+# Compare against ~39,000 UP/year in Norway [3]
+# -----------------------------------------------------------------------------
+cat("\n--- VALIDATION: UP proportions per cycle (35-39 group) ---\n")
+cat("FemBloc UP proportions:\n")
+print(round(results_fembloc[["35-39"]]$up_vec, 4))
+cat("TL UP proportions:\n")
+print(round(results_tl[["35-39"]]$up_vec, 4))
+
+# Save results
+save.image("fembloc_markov.RData")
+```
+
+
+```{r}
+# -----------------------------------------------------------------------------
+# BASE CASE ICER (reference point)
+# -----------------------------------------------------------------------------
+icer_base <- icer_qaly
+cat("Base case ICER (NOK/QALY):", round(icer_base), "\n")
+
+# -----------------------------------------------------------------------------
+# AE DISUTILITY BOUNDS
+# FemBloc: ±10% on disutility weights for perforation and pelvic pain
+# TL:      ±1.96 x SE for PID (Pillay et al.), ±10% for pelvic pain
+# -----------------------------------------------------------------------------
+
+# FemBloc components
+p_perforation   <- 0.00480769
+p_pain_fb       <- 0.37117904
+disut_perf      <- 0.49
+disut_pain_fb   <- 0.35
+dur_perf_yrs    <- 21 / 365
+dur_pain_fb_yrs <- 7  / 365
+
+# TL components
+p_pid           <- 0.017
+p_pain_tl       <- 0.0393
+disut_pid       <- 0.15
+disut_pain_tl   <- 0.35
+sd_pid          <- 0.315        # Pillay et al. [23]
+dur_pid_yrs     <- 21 / 365
+dur_pain_tl_yrs <- 7  / 365
+
+# Verify base case totals match parameters chunk
+u_ae_fb_check <- (p_perforation * disut_perf    * dur_perf_yrs)    +
+                 (p_pain_fb     * disut_pain_fb  * dur_pain_fb_yrs)
+u_ae_tl_check <- (p_pid         * disut_pid      * dur_pid_yrs)    +
+                 (p_pain_tl     * disut_pain_tl  * dur_pain_tl_yrs)
+
+cat("u_ae_fembloc check (should be 0.002627):", round(u_ae_fb_check, 6), "\n")
+cat("u_ae_tl check (should be 0.000411):     ", round(u_ae_tl_check, 6), "\n")
+
+# DSA bounds
+u_ae_fb_lo <- (p_perforation * (disut_perf   * 0.90) * dur_perf_yrs)    +
+              (p_pain_fb     * (disut_pain_fb * 0.90) * dur_pain_fb_yrs)
+u_ae_fb_hi <- (p_perforation * (disut_perf   * 1.10) * dur_perf_yrs)    +
+              (p_pain_fb     * (disut_pain_fb * 1.10) * dur_pain_fb_yrs)
+
+u_ae_tl_lo <- (p_pid     * max(0, disut_pid - 1.96 * sd_pid) * dur_pid_yrs) +
+              (p_pain_tl * (disut_pain_tl * 0.90)            * dur_pain_tl_yrs)
+u_ae_tl_hi <- (p_pid     * min(1, disut_pid + 1.96 * sd_pid) * dur_pid_yrs) +
+              (p_pain_tl * (disut_pain_tl * 1.10)            * dur_pain_tl_yrs)
+
+cat("\nFemBloc AE disutility - Low:", round(u_ae_fb_lo, 6),
+    "| Base:", round(u_ae_fembloc, 6),
+    "| High:", round(u_ae_fb_hi, 6), "\n")
+cat("TL AE disutility      - Low:", round(u_ae_tl_lo, 6),
+    "| Base:", round(u_ae_tl, 6),
+    "| High:", round(u_ae_tl_hi, 6), "\n")
+
+# -----------------------------------------------------------------------------
+# PROBABILITY BOUNDS
+# -----------------------------------------------------------------------------
+
+# FemBloc fail rate: Beta(10, 199)
+alpha_fb        <- 9   + 1
+beta_fb         <- 198 + 1
+fembloc_fail_lo <- qbeta(0.025, alpha_fb, beta_fb)
+fembloc_fail_hi <- qbeta(0.975, alpha_fb, beta_fb)
+
+# TL fail rate: Wilson score CI (Schwartz et al., n=23956)
+tl_fail_lo <- 0.0244
+tl_fail_hi <- 0.0285
+
+cat("\nFemBloc fail rate - Low:", round(fembloc_fail_lo, 4),
+    "| Base:", round(p_fail_fembloc, 4),
+    "| High:", round(fembloc_fail_hi, 4), "\n")
+cat("TL fail rate      - Low:", tl_fail_lo,
+    "| Base:", p_fail_tl,
+    "| High:", tl_fail_hi, "\n")
+
+# -----------------------------------------------------------------------------
+# COST BOUNDS
+# Only sampled costs varied (±1.96 x SE)
+# Fixed costs unchanged: DRG tariffs, enhetskostnader, AE costs, travel
+# -----------------------------------------------------------------------------
+
+se_device     <- 4540
+se_premed_fb  <- 101
+se_postmed_fb <- 3
+se_premed_tl  <- 324
+se_postmed_tl <- 14
+
+# FemBloc: device + premed + postmed sampled; rest fixed
+fb_cost_lo <- (fembloc_device_cost - 1.96 * se_device)     +
+              (fembloc_premed_cost  - 1.96 * se_premed_fb)  +
+              (fembloc_postmed_cost - 1.96 * se_postmed_fb) +
+              fembloc_insertion_fee    +
+              fembloc_ultrasound_cost  +
+              fembloc_consult_cost     +
+              ae_cost_fembloc          +
+              fembloc_travel_leisure
+
+fb_cost_hi <- (fembloc_device_cost + 1.96 * se_device)     +
+              (fembloc_premed_cost  + 1.96 * se_premed_fb)  +
+              (fembloc_postmed_cost + 1.96 * se_postmed_fb) +
+              fembloc_insertion_fee    +
+              fembloc_ultrasound_cost  +
+              fembloc_consult_cost     +
+              ae_cost_fembloc          +
+              fembloc_travel_leisure
+
+# TL: premed + postmed sampled; procedure (DRG) and AE costs fixed
+tl_cost_lo <- tl_procedure_cost                         +
+              (tl_premed_cost  - 1.96 * se_premed_tl)  +
+              (tl_postmed_cost - 1.96 * se_postmed_tl) +
+              ae_cost_tl                                +
+              tl_travel_leisure
+
+tl_cost_hi <- tl_procedure_cost                         +
+              (tl_premed_cost  + 1.96 * se_premed_tl)  +
+              (tl_postmed_cost + 1.96 * se_postmed_tl) +
+              ae_cost_tl                                +
+              tl_travel_leisure
+
+cat("\nFemBloc cost - Low:", round(fb_cost_lo),
+    "| Base:", round(fembloc_cost_cycle0),
+    "| High:", round(fb_cost_hi), "\n")
+cat("TL cost      - Low:", round(tl_cost_lo),
+    "| Base:", round(tl_cost_cycle0),
+    "| High:", round(tl_cost_hi), "\n")
+
+# -----------------------------------------------------------------------------
+# Full model with parameter overrides
+# -----------------------------------------------------------------------------
+run_dsa <- function(
+    p_fail_fb     = p_fail_fembloc,
+    p_fail_tl_dsa = p_fail_tl,
+    cost_fb_total = fembloc_cost_cycle0,
+    cost_tl_total = tl_cost_cycle0,
+    u_ae_fb       = u_ae_fembloc,
+    u_ae_tl_dsa   = u_ae_tl
+) {
+
+  run_arm <- function(arm, ag) {
+    horizon   <- ag$horizon
+    mid_age   <- ag$midpoint
+    disc_r    <- ag$disc_rate
+    p_fail    <- if (arm == "fembloc") p_fail_fb else p_fail_tl_dsa
+    proc_cost <- if (arm == "fembloc") cost_fb_total else cost_tl_total
+
+    fr_cycle1 <- get_fr(mid_age)
+
+    if (arm == "fembloc") {
+      prop_pc <- p_confirmed + (p_unconfirmed * (1 - fr_cycle1))
+      prop_up <- p_unconfirmed * fr_cycle1
+    } else {
+      prop_pc <- 1.0
+      prop_up <- 0.0
+    }
+
+    costs <- numeric(horizon)
+    qalys <- numeric(horizon)
+
+    for (cycle in 1:horizon) {
+      current_age     <- mid_age + (cycle - 1)
+      fr_current      <- get_fr(current_age)
+      p_fail_adj      <- p_fail * fr_current
+      up_cost_current <- up_state_cost_by_age[
+        ifelse(current_age < 30, "25-29",
+        ifelse(current_age < 35, "30-34",
+        ifelse(current_age < 40, "35-39",
+        ifelse(current_age < 45, "40-44", "45-50"))))]
+
+      disc_factor <- 1 / (1 + disc_r)^cycle
+      hcc         <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+
+      u_pc_cycle  <- if (cycle == 1) {
+        u_pc - if (arm == "fembloc") u_ae_fb else u_ae_tl_dsa
+      } else u_pc
+
+      qalys[cycle] <- (prop_pc * u_pc_cycle + prop_up * u_up) * hcc * disc_factor
+      costs[cycle] <- (prop_up * up_cost_current) * disc_factor
+
+      new_up  <- prop_pc * p_fail_adj
+      prop_pc <- prop_pc * (1 - p_fail_adj) + prop_up
+      prop_up <- new_up
+    }
+
+    list(total_cost = proc_cost + sum(costs),
+         total_qaly = sum(qalys))
+  }
+
+  cost_fb <- sum(sapply(1:nrow(age_groups), function(i)
+    run_arm("fembloc", age_groups[i,])$total_cost * age_groups$prop[i]))
+  qaly_fb <- sum(sapply(1:nrow(age_groups), function(i)
+    run_arm("fembloc", age_groups[i,])$total_qaly * age_groups$prop[i]))
+  cost_tl <- sum(sapply(1:nrow(age_groups), function(i)
+    run_arm("tl", age_groups[i,])$total_cost * age_groups$prop[i]))
+  qaly_tl <- sum(sapply(1:nrow(age_groups), function(i)
+    run_arm("tl", age_groups[i,])$total_qaly * age_groups$prop[i]))
+
+  (cost_fb - cost_tl) / (qaly_fb - qaly_tl)
+}
+
+# -----------------------------------------------------------------------------
+# RUN DSA — one parameter at a time
+# -----------------------------------------------------------------------------
+dsa_results <- data.frame(
+  parameter = character(),
+  icer_low  = numeric(),
+  icer_high = numeric(),
+  stringsAsFactors = FALSE
+)
+
+add_dsa <- function(name, icer_lo, icer_hi) {
+  dsa_results <<- rbind(dsa_results, data.frame(
+    parameter = name,
+    icer_low  = round(icer_lo),
+    icer_high = round(icer_hi)
+  ))
+}
+
+add_dsa("FemBloc costs",
+        run_dsa(cost_fb_total = fb_cost_lo),
+        run_dsa(cost_fb_total = fb_cost_hi))
+
+add_dsa("TL costs",
+        run_dsa(cost_tl_total = tl_cost_lo),
+        run_dsa(cost_tl_total = tl_cost_hi))
+
+add_dsa("FemBloc fail rate",
+        run_dsa(p_fail_fb = fembloc_fail_lo),
+        run_dsa(p_fail_fb = fembloc_fail_hi))
+
+add_dsa("TL fail rate",
+        run_dsa(p_fail_tl_dsa = tl_fail_lo),
+        run_dsa(p_fail_tl_dsa = tl_fail_hi))
+
+add_dsa("FemBloc AE disutility",
+        run_dsa(u_ae_fb = u_ae_fb_lo),
+        run_dsa(u_ae_fb = u_ae_fb_hi))
+
+add_dsa("TL AE disutility",
+        run_dsa(u_ae_tl_dsa = u_ae_tl_lo),
+        run_dsa(u_ae_tl_dsa = u_ae_tl_hi))
+
+# -----------------------------------------------------------------------------
+# RESULTS TABLE
+# -----------------------------------------------------------------------------
+dsa_results$swing <- abs(dsa_results$icer_high - dsa_results$icer_low)
+
+cat("\n========== DSA RESULTS (ICER NOK/QALY) ==========\n")
+cat("Base case ICER:", round(icer_base), "\n\n")
+print(dsa_results[order(-dsa_results$swing), ])
+
+kable(dsa_results[order(-dsa_results$swing), ],
+      caption = "One-Way Sensitivity Analysis — ICER (NOK per QALY)",
+      col.names = c("Parameter", "ICER Low", "ICER High", "Swing"),
+      row.names = FALSE) |>
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+cat("Total UPs FemBloc:", round(sum(up_fembloc), 2), "\n")
+cat("Total UPs TL:     ", round(sum(up_tl), 2), "\n")
+cat("Cost per UP avoided (ICER_UP): NOK", round(icer_up, 2), "\n")
+
+# -----------------------------------------------------------------------------
+# TORNADO DIAGRAM
+# =============================================================================
+
+library(scales)
+
+wtp_cap <- 500000
+
+# --- Prep data ---
+dsa_plot <- dsa_results[order(dsa_results$swing), ]
+dsa_plot$parameter <- factor(dsa_plot$parameter, levels = dsa_plot$parameter)
+
+# Cap for plotting only
+dsa_plot$low_plot  <- pmax(pmin(dsa_plot$icer_low,  wtp_cap), -wtp_cap)
+dsa_plot$high_plot <- pmax(pmin(dsa_plot$icer_high, wtp_cap), -wtp_cap)
+
+# Labels — shortened to k format, dominated in red
+dsa_plot$label_low <- ifelse(
+  dsa_plot$icer_low < 0, "Dominated",
+  paste0("NOK ", round(dsa_plot$icer_low / 1000), "k")
+)
+dsa_plot$label_high <- ifelse(
+  dsa_plot$icer_high < 0, "Dominated",
+  paste0("NOK ", round(dsa_plot$icer_high / 1000), "k")
+)
+
+dsa_plot$col_low  <- ifelse(dsa_plot$icer_low  < 0, "#CC0000", "#1B3A6B")
+dsa_plot$col_high <- ifelse(dsa_plot$icer_high < 0, "#CC0000", "#1B3A6B")
+dsa_plot$face_low  <- ifelse(dsa_plot$icer_low  < 0, "bold", "plain")
+dsa_plot$face_high <- ifelse(dsa_plot$icer_high < 0, "bold", "plain")
+
+# --- Plot ---
+tornado2 <- ggplot(dsa_plot) +
+
+  # Shaded reference band around base case
+  annotate("rect",
+           xmin  = icer_base * 0.95,
+           xmax  = icer_base * 1.05,
+           ymin  = -Inf,
+           ymax  = Inf,
+           fill  = "grey90",
+           alpha = 0.5) +
+
+  # Connecting line
+  geom_segment(aes(x    = low_plot,
+                   xend = high_plot,
+                   y    = parameter,
+                   yend = parameter),
+               color     = "grey70",
+               linewidth = 0.8) +
+
+  # Low endpoint dot
+  geom_point(aes(x = low_plot, y = parameter),
+             color = dsa_plot$col_low,
+             size  = 5,
+             shape = 19) +
+
+  # High endpoint dot
+  geom_point(aes(x = high_plot, y = parameter),
+             color = dsa_plot$col_high,
+             size  = 5,
+             shape = 19) +
+
+  # Base case vertical line
+  geom_vline(xintercept = icer_base,
+             linetype   = "dashed",
+             color      = "#CC0000",
+             linewidth  = 1.0) +
+
+  # Zero line
+  geom_vline(xintercept = 0,
+             linetype   = "dotted",
+             color      = "grey50",
+             linewidth  = 0.6) +
+
+# Low labels — to the LEFT of the dot
+geom_text(aes(x = low_plot - 8000,
+              y = as.numeric(parameter),
+              label = label_low),
+          size     = 2.8,
+          hjust    = 1,          # right-align text to the left of dot
+          color    = dsa_plot$col_low,
+          fontface = dsa_plot$face_low) +
+
+# High labels — to the RIGHT of the dot  
+geom_text(aes(x = high_plot + 8000,
+              y = as.numeric(parameter),
+              label = label_high),
+          size     = 2.8,
+          hjust    = 0,          # left-align text to the right of dot
+          color    = dsa_plot$col_high,
+          fontface = dsa_plot$face_high) +
+
+  scale_x_continuous(
+    breaks = c(-500000, -300000, -100000, 0, 100000, 300000, 500000),
+    labels = c("-500k", "-300k", "-100k", "0", "100k", "300k", "500k"),
+    limits = c(-620000, 620000)
+  ) +
+
+  labs(
+    title    = "One-Way Sensitivity Analysis",
+    subtitle = paste0(
+      "Base case ICER: NOK ",
+      format(round(icer_base), big.mark = ","),
+      " per QALY  |  Dots capped at \u00b1500,000 NOK  |  True values labelled"
+    ),
+    x       = "ICER (NOK per QALY)",
+    y       = NULL,
+    caption = paste0(
+      "\u25cf Dark blue = parameter bound ICER  ",
+      "\u25cf Red = FemBloc\u00ae dominated (more costly, less effective)\n",
+      "Red dashed line = base case ICER  |  ",
+      "Grey dotted line = cost neutrality (ICER = 0)"
+    )
+  ) +
+
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title         = element_text(face = "bold", size = 14, color = "#1B3A6B"),
+    plot.subtitle      = element_text(color = "grey40", size = 9),
+    plot.caption       = element_text(color = "grey50", size = 8),
+    axis.text.y        = element_text(size = 10, color = "grey20"),
+    axis.text.x        = element_text(size = 9),
+    panel.grid.major.y = element_blank(),
+    panel.grid.major.x = element_line(color = "grey90"),
+    panel.grid.minor   = element_blank(),
+    plot.margin        = margin(15, 20, 15, 15)
+  )
+
+print(tornado2)
+
+# Save high resolution
+ggsave("fembloc_tornado.png", tornado2, width = 10, height = 6, dpi = 300, bg = "white")
+
+cat("Tornado saved as fembloc_tornado.png\n")
+
+```
+
+```{r psa, cache=TRUE}
+
+library(MCMCpack)  # for rdirichlet
+
+set.seed(123)
+n_sim <- 10000
+
+# -----------------------------------------------------------------------------
+# 1. DISTRIBUTION PARAMETERS
+# -----------------------------------------------------------------------------
+
+# --- Costs: Gamma(alpha, rate) | rate = alpha / mean ---
+# Gamma mean = alpha/rate, so rate = alpha/mean
+gamma_rate <- function(alpha, mean) alpha / mean
+
+# FemBloc
+g_device_a   <- 6;      g_device_m   <- 11350
+g_premed_fb_a <- 25;    g_premed_fb_m <- 506
+g_postmed_fb_a <- 25;   g_postmed_fb_m <- 17
+
+# TL
+g_premed_tl_a <- 25;    g_premed_tl_m <- 1622
+g_postmed_tl_a <- 25;   g_postmed_tl_m <- 71
+
+# --- Probabilities: Beta(alpha, beta) ---
+# Fail rates
+a_fail_fb  <- 10;   b_fail_fb  <- 199    # FemBloc fail rate
+a_fail_tl  <- 633;  b_fail_tl  <- 23325  # TL fail rate
+
+# Confirmation rate
+a_confirm  <- 207;  b_confirm  <- 21     # FemChec -> PC
+
+# --- Utilities: Beta(alpha, beta) ---
+a_u_pc <- 2302.31;  b_u_pc <- 527.38    # PC state
+a_u_up <- 400.13;   b_u_up <- 418.14    # UP state
+
+# --- AE disutility components ---
+# FemBloc: perforation and pelvic pain (±10% on disutility weights)
+# Sampled as Beta on the disutility weight itself
+
+se_disut_perf  <- 0.049
+se_disut_pain  <- 0.035
+
+mom_beta <- function(mean, se) {
+  var   <- se^2
+  kappa <- (mean * (1 - mean) / var) - 1
+  list(alpha = mean * kappa, beta = (1 - mean) * kappa)
+}
+
+b_perf <- mom_beta(0.49, se_disut_perf)
+b_pain <- mom_beta(0.35, se_disut_pain)
+
+# TL: PID disutility (SE=0.315 from Pillay et al.), pelvic pain ±10%
+b_pid  <- mom_beta(min(0.15, 0.999), 0.315)   # wide uncertainty
+b_pain_tl <- mom_beta(0.35, se_disut_pain)
+
+# --- Fecundity ratios: Log-normal(log_mu, log_sigma) ---
+
+fr_log_mu    <- setNames(band_summary$logFR_mean, age_groups$group)
+fr_log_sigma <- setNames(sqrt(band_summary$logFR_var), age_groups$group)
+
+# --- UP outcome probabilities: Dirichlet ---
+# Alpha = probability * nordeng_total (actual registry counts from Nordeng et al.-855062)
+
+up_dir_alpha <- up_probs * nordeng_total   # 5 x 4 matrix of Dirichlet alphas
+
+# -----------------------------------------------------------------------------
+# 2. PSA DRAW FUNCTION
+# Samples all parameters once, returns named list
+# -----------------------------------------------------------------------------
+draw_psa_params <- function() {
+
+  # --- Costs ---
+  d_device    <- rgamma(1, shape = g_device_a,
+                        rate  = gamma_rate(g_device_a, g_device_m))
+  d_premed_fb <- rgamma(1, shape = g_premed_fb_a,
+                        rate  = gamma_rate(g_premed_fb_a, g_premed_fb_m))
+  d_postmed_fb <- rgamma(1, shape = g_postmed_fb_a,
+                         rate  = gamma_rate(g_postmed_fb_a, g_postmed_fb_m))
+  d_premed_tl  <- rgamma(1, shape = g_premed_tl_a,
+                         rate  = gamma_rate(g_premed_tl_a, g_premed_tl_m))
+  d_postmed_tl <- rgamma(1, shape = g_postmed_tl_a,
+                         rate  = gamma_rate(g_postmed_tl_a, g_postmed_tl_m))
+
+  # Recompute cycle 0 costs with sampled components
+  fb_cost <- d_device      +
+             d_premed_fb   +
+             d_postmed_fb  +
+             fembloc_insertion_fee   +   # fixed
+             fembloc_ultrasound_cost +   # fixed
+             fembloc_consult_cost    +   # fixed
+             ae_cost_fembloc         +   # fixed
+             fembloc_travel_leisure      # fixed
+
+  tl_cost <- tl_procedure_cost  +        # fixed
+             d_premed_tl        +
+             d_postmed_tl       +
+             ae_cost_tl         +        # fixed
+             tl_travel_leisure           # fixed
+
+  # --- Probabilities ---
+  p_fail_fb_s  <- rbeta(1, a_fail_fb,  b_fail_fb)
+  p_fail_tl_s  <- rbeta(1, a_fail_tl,  b_fail_tl)
+  p_confirm_s  <- rbeta(1, a_confirm,  b_confirm)
+  p_unconfirm_s <- 1 - p_confirm_s
+
+  # --- Utilities ---
+  u_pc_s <- rbeta(1, a_u_pc, b_u_pc)
+  u_up_s <- rbeta(1, a_u_up, b_u_up)
+
+  # --- AE disutilities ---
+  disut_perf_s    <- rbeta(1, b_perf$alpha, b_perf$beta)
+  disut_pain_fb_s <- rbeta(1, b_pain$alpha, b_pain$beta)
+  disut_pid_s     <- rbeta(1, b_pid$alpha,  b_pid$beta)
+  disut_pain_tl_s <- rbeta(1, b_pain_tl$alpha, b_pain_tl$beta)
+
+  u_ae_fb_s <- (p_perforation * disut_perf_s    * dur_perf_yrs)    +
+               (p_pain_fb     * disut_pain_fb_s  * dur_pain_fb_yrs)
+  u_ae_tl_s <- (p_pid         * disut_pid_s      * dur_pid_yrs)    +
+               (p_pain_tl     * disut_pain_tl_s  * dur_pain_tl_yrs)
+
+  # --- Fecundity ratios ---
+  fr_s <- setNames(
+    rlnorm(5, meanlog = fr_log_mu, sdlog = fr_log_sigma),
+    age_groups$group
+  )
+
+  # --- UP outcome probabilities: Dirichlet per age group ---
+  up_probs_s <- matrix(NA, nrow = 5, ncol = 4,
+                       dimnames = dimnames(up_probs))
+  for (i in 1:5) {
+    up_probs_s[i, ] <- rdirichlet(1, up_dir_alpha[i, ])
+  }
+
+  # Recompute UP state costs with sampled probabilities
+  outcome_costs_s <- c(cost_live_birth, cost_induced_abortion,
+                       cost_miscarriage, cost_ectopic_pregnancy)
+  up_costs_s <- as.vector(up_probs_s %*% outcome_costs_s)
+  names(up_costs_s) <- age_groups$group
+
+  list(
+    fb_cost       = fb_cost,
+    tl_cost       = tl_cost,
+    p_fail_fb     = p_fail_fb_s,
+    p_fail_tl     = p_fail_tl_s,
+    p_confirm     = p_confirm_s,
+    p_unconfirm   = p_unconfirm_s,
+    u_pc          = u_pc_s,
+    u_up          = u_up_s,
+    u_ae_fb       = u_ae_fb_s,
+    u_ae_tl       = u_ae_tl_s,
+    fr            = fr_s,
+    up_costs      = up_costs_s
+  )
+}
+
+# -----------------------------------------------------------------------------
+# 3. PSA MARKOV FUNCTION
+# Runs one arm for one age group using sampled parameters
+# -----------------------------------------------------------------------------
+run_psa_arm <- function(arm, ag, p) {
+
+  horizon   <- ag$horizon
+  mid_age   <- ag$midpoint
+  disc_r    <- ag$disc_rate
+  p_fail    <- if (arm == "fembloc") p$p_fail_fb else p$p_fail_tl
+  proc_cost <- if (arm == "fembloc") p$fb_cost   else p$tl_cost
+
+  grp_start <- ag$group
+  fr_cycle1 <- p$fr[grp_start]
+
+  if (arm == "fembloc") {
+    prop_pc <- p$p_confirm   + (p$p_unconfirm * (1 - fr_cycle1))
+    prop_up <- p$p_unconfirm * fr_cycle1
+  } else {
+    prop_pc <- 1.0
+    prop_up <- 0.0
+  }
+
+  costs <- numeric(horizon)
+  qalys <- numeric(horizon)
+  ups   <- numeric(horizon)
+
+  for (cycle in 1:horizon) {
+    current_age <- mid_age + (cycle - 1)
+
+    current_grp <- ifelse(current_age < 30, "25-29",
+                   ifelse(current_age < 35, "30-34",
+                   ifelse(current_age < 40, "35-39",
+                   ifelse(current_age < 45, "40-44", "45-50"))))
+
+    fr_current  <- p$fr[current_grp]
+    p_fail_adj  <- p_fail * fr_current
+    up_cost_now <- p$up_costs[current_grp]
+
+    disc_factor <- 1 / (1 + disc_r)^cycle
+    hcc         <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+
+    u_pc_cycle  <- if (cycle == 1) {
+      p$u_pc - if (arm == "fembloc") p$u_ae_fb else p$u_ae_tl
+    } else p$u_pc
+
+    ups[cycle]   <- prop_up                              # track UP occupancy
+    qalys[cycle] <- (prop_pc * u_pc_cycle + prop_up * p$u_up) *
+                     hcc * disc_factor
+    costs[cycle] <- (prop_up * up_cost_now) * disc_factor
+
+    new_up  <- prop_pc * p_fail_adj
+    prop_pc <- prop_pc * (1 - p_fail_adj) + prop_up
+    prop_up <- new_up
+  }
+
+  list(cost = proc_cost + sum(costs),
+       qaly = sum(qalys),
+       up   = sum(ups))
+}
+
+# -----------------------------------------------------------------------------
+# 4. RUN PSA
+# -----------------------------------------------------------------------------
+cat("Running", n_sim, "PSA simulations...\n")
+pb <- txtProgressBar(min = 0, max = n_sim, style = 3)
+
+# Storage: aggregated results
+psa_cost_fb  <- numeric(n_sim)
+psa_cost_tl  <- numeric(n_sim)
+psa_qaly_fb  <- numeric(n_sim)
+psa_qaly_tl  <- numeric(n_sim)
+psa_up_fb    <- numeric(n_sim)  
+psa_up_tl    <- numeric(n_sim)
+
+
+
+# Storage: by age group (for INMB and EVPPI)
+psa_age_cost_fb <- matrix(NA, n_sim, nrow(age_groups),
+                           dimnames = list(NULL, age_groups$group))
+psa_age_cost_tl <- matrix(NA, n_sim, nrow(age_groups),
+                           dimnames = list(NULL, age_groups$group))
+psa_age_qaly_fb <- matrix(NA, n_sim, nrow(age_groups),
+                           dimnames = list(NULL, age_groups$group))
+psa_age_qaly_tl <- matrix(NA, n_sim, nrow(age_groups),
+                           dimnames = list(NULL, age_groups$group))
+
+for (s in 1:n_sim) {
+
+  p <- draw_psa_params()
+
+  for (i in 1:nrow(age_groups)) {
+    ag <- age_groups[i, ]
+    fb <- run_psa_arm("fembloc", ag, p)
+    tl <- run_psa_arm("tl",      ag, p)
+
+    psa_age_cost_fb[s, i] <- fb$cost
+    psa_age_cost_tl[s, i] <- tl$cost
+    psa_age_qaly_fb[s, i] <- fb$qaly
+    psa_age_qaly_tl[s, i] <- tl$qaly
+    psa_up_fb[s] <- psa_up_fb[s] + fb$up * ag$prop
+    psa_up_tl[s] <- psa_up_tl[s] + tl$up * ag$prop
+  }
+
+  # Weighted aggregate
+  psa_cost_fb[s] <- sum(psa_age_cost_fb[s, ] * age_groups$prop)
+  psa_cost_tl[s] <- sum(psa_age_cost_tl[s, ] * age_groups$prop)
+  psa_qaly_fb[s] <- sum(psa_age_qaly_fb[s, ] * age_groups$prop)
+  psa_qaly_tl[s] <- sum(psa_age_qaly_tl[s, ] * age_groups$prop)
+
+  setTxtProgressBar(pb, s)
+}
+close(pb)
+
+# Incremental results
+psa_inc_cost <- psa_cost_fb - psa_cost_tl
+psa_inc_qaly <- psa_qaly_fb - psa_qaly_tl
+psa_icer     <- psa_inc_cost / psa_inc_qaly
+cat("\n\n========== PSA SUMMARY ==========\n")
+cat("Mean incremental cost: NOK", round(mean(psa_inc_cost)), "\n")
+cat("Mean incremental QALY:", round(mean(psa_inc_qaly), 4), "\n")
+cat("Mean ICER:            ", round(mean(psa_icer[is.finite(psa_icer)])), "\n")
+cat("% simulations FemBloc cost-effective at NOK 500,000/QALY:",
+    round(mean(psa_inc_cost < 500000 * psa_inc_qaly) * 100, 1), "%\n")
+
+psa_inc_up      <- psa_up_fb - psa_up_tl
+psa_cost_per_up <- psa_inc_cost / (psa_up_tl - psa_up_fb)
+
+cat("\n========== COST PER UP AVOIDED ==========\n")
+total_up_fembloc <- sum(up_fembloc)
+total_up_tl      <- sum(up_tl)
+cat("Deterministic - Total UPs FemBloc:", round(total_up_fembloc, 2), "\n")
+cat("Deterministic - Total UPs TL:     ", round(total_up_tl, 2), "\n")
+cat("Deterministic - Cost per UP avoided: NOK",
+    round(inc_cost / (total_up_tl - total_up_fembloc), 2), "\n")
+cat("PSA Mean inc UPs:            ", round(mean(psa_inc_up), 2), "\n")
+cat("PSA Mean cost per UP avoided: NOK",
+    round(mean(psa_cost_per_up[is.finite(psa_cost_per_up)]), 2), "\n")
+cat("PSA 95% CI: NOK",
+    round(quantile(psa_cost_per_up[is.finite(psa_cost_per_up)], 0.025), 2),
+    "to",
+    round(quantile(psa_cost_per_up[is.finite(psa_cost_per_up)], 0.975), 2), "\n")
+
+# -----------------------------------------------------------------------------
+# 5. COST-EFFECTIVENESS PLANE
+# -----------------------------------------------------------------------------
+ce_data <- data.frame(
+  inc_cost = psa_inc_cost,
+  inc_qaly = psa_inc_qaly
+)
+
+# Colour by quadrant
+ce_data$quadrant <- ifelse(psa_inc_cost < 0 & psa_inc_qaly >= 0, "Dominant",
+                    ifelse(psa_inc_cost >= 0 & psa_inc_qaly >= 0, "More effective, more costly",
+                    ifelse(psa_inc_cost < 0 & psa_inc_qaly < 0,  "Less effective, less costly",
+                                                                   "Dominated")))
+
+ce_plane <- ggplot(ce_data, aes(x = inc_qaly, y = inc_cost,
+                                 color = quadrant)) +
+  geom_point(alpha = 0.15, size = 0.8) +
+  geom_hline(yintercept = 0, color = "grey40", linewidth = 0.6) +
+  geom_vline(xintercept = 0, color = "grey40", linewidth = 0.6) +
+  # WTP threshold line (500,000 NOK)
+  geom_abline(slope     = 500000,
+              intercept = 0,
+              linetype  = "dashed",
+              color     = "#CC0000",
+              linewidth = 0.8) +
+  # Base case point
+  annotate("point", x = inc_qaly, y = inc_cost,
+           color = "#1B3A6B", size = 4, shape = 18) +
+  scale_color_manual(values = c(
+    "Dominant"                   = "#2E8B57",
+    "More effective, more costly"= "#1B3A6B",
+    "Less effective, less costly"= "#FFA500",
+    "Dominated"                  = "#CC0000"
+  )) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "Cost-Effectiveness Plane",
+    subtitle = paste0("10,000 PSA simulations | Base case ICER: NOK ",
+                      format(round(icer_base), big.mark = ","), " per QALY"),
+    x        = "Incremental QALYs (FemBloc\u00ae vs TL)",
+    y        = "Incremental Cost (NOK)",
+    color    = "Quadrant",
+    caption  = "Diamond = base case | Red dashed line = NOK 500,000/QALY threshold"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle = element_text(color = "grey40", size = 9),
+    legend.position = "bottom"
+  )
+
+print(ce_plane)
+ggsave("fembloc_ce_plane.png", ce_plane, width = 10, height = 6, dpi = 300, bg = "white")
+
+# -----------------------------------------------------------------------------
+# 6. COST-EFFECTIVENESS ACCEPTABILITY CURVE (CEAC)
+# -----------------------------------------------------------------------------
+wtp_seq <- seq(0, 500000, by = 10000)
+
+# Aggregate CEAC
+ceac_agg <- sapply(wtp_seq, function(wtp)
+  mean((wtp * psa_inc_qaly - psa_inc_cost) > 0))
+
+# CEAC by age group
+ceac_by_age <- sapply(age_groups$group, function(grp) {
+  i <- which(age_groups$group == grp)
+  inc_c <- psa_age_cost_fb[, i] - psa_age_cost_tl[, i]
+  inc_q <- psa_age_qaly_fb[, i] - psa_age_qaly_tl[, i]
+  sapply(wtp_seq, function(wtp) mean((wtp * inc_q - inc_c) > 0))
+})
+
+ceac_df <- data.frame(
+  wtp      = wtp_seq,
+  Aggregate = ceac_agg
+)
+ceac_df <- cbind(ceac_df, as.data.frame(ceac_by_age))
+
+# Reshape for plotting
+ceac_long <- tidyr::pivot_longer(ceac_df,
+                                  cols      = -wtp,
+                                  names_to  = "group",
+                                  values_to = "prob_ce")
+
+# Plot
+ceac_plot <- ggplot(ceac_long,
+                    aes(x = wtp / 1000, y = prob_ce,
+                        color = group,
+                        linewidth = ifelse(group == "Aggregate", 1.2, 0.6),
+                        linetype  = ifelse(group == "Aggregate",
+                                           "solid", "dashed"))) +
+  geom_line() +
+  geom_hline(yintercept = 0.5, linetype = "dotted",
+             color = "grey50", linewidth = 0.5) +
+  geom_vline(xintercept = icer_base / 1000,
+             linetype = "dashed", color = "#CC0000",
+             linewidth = 0.8) +
+  scale_x_continuous(labels = scales::comma,
+                     breaks = seq(0, 500, by = 100)) +
+  scale_y_continuous(labels = scales::percent,
+                     limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.1)) +
+  scale_color_manual(values = c(
+    "Aggregate" = "#1B3A6B",
+    "25-29"     = "#4E9AF1",
+    "30-34"     = "#2ECC71",
+    "35-39"     = "#F39C12",
+    "40-44"     = "#9B59B6",
+    "45-50"     = "#E74C3C"
+  )) +
+  scale_linewidth_identity() +
+  scale_linetype_identity() +
+  labs(
+    title    = "Cost-Effectiveness Acceptability Curve (CEAC)",
+    subtitle = "Probability FemBloc\u00ae is cost-effective vs Tubal Ligation",
+    x        = "Willingness-to-Pay Threshold (NOK thousands per QALY)",
+    y        = "Probability Cost-Effective",
+    color    = "Group",
+    caption  = "Red dashed line = base case ICER | Dotted line = 50% threshold"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle   = element_text(color = "grey40", size = 9),
+    legend.position = "right"
+  )
+
+print(ceac_plot)
+ggsave("fembloc_ceac.png", ceac_plot, width = 10, height = 6, dpi = 300, bg = "white")
+
+# --- CEAF ---
+# At each WTP: identify strategy with highest mean NMB
+# Report probability that optimal strategy is cost-effective
+
+ceaf_df <- data.frame(
+  wtp      = wtp_seq,
+  nmb_fb   = sapply(wtp_seq, function(w) mean(w * psa_qaly_fb - psa_cost_fb)),
+  nmb_tl   = sapply(wtp_seq, function(w) mean(w * psa_qaly_tl - psa_cost_tl)),
+  prob_fb  = ceac_agg,
+  prob_tl  = 1 - ceac_agg
+)
+
+# Optimal strategy at each WTP
+ceaf_df$optimal       <- ifelse(ceaf_df$nmb_fb >= ceaf_df$nmb_tl,
+                                 "FemBloc", "TL")
+ceaf_df$prob_optimal  <- ifelse(ceaf_df$optimal == "FemBloc",
+                                 ceaf_df$prob_fb,
+                                 ceaf_df$prob_tl)
+
+ceaf_plot <- ggplot(ceaf_df, aes(x = wtp / 1000)) +
+
+  # CEAC lines (faded background)
+  geom_line(aes(y = prob_fb),
+            color = "#1B3A6B", linetype = "dashed",
+            linewidth = 0.5, alpha = 0.4) +
+  geom_line(aes(y = prob_tl),
+            color = "#CC0000", linetype = "dashed",
+            linewidth = 0.5, alpha = 0.4) +
+
+  # CEAF frontier
+  geom_line(aes(y = prob_optimal, color = optimal),
+            linewidth = 1.2) +
+
+  geom_vline(xintercept = icer_base / 1000,
+             linetype = "dashed", color = "grey50",
+             linewidth = 0.6) +
+  geom_hline(yintercept = 0.5,
+             linetype = "dotted", color = "grey50",
+             linewidth = 0.5) +
+
+  scale_color_manual(values = c("FemBloc" = "#1B3A6B",
+                                 "TL"      = "#CC0000"),
+                     name   = "Optimal strategy") +
+  scale_x_continuous(breaks = seq(0, 500, by = 100)) +
+  scale_y_continuous(labels = scales::percent,
+                     limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.1)) +
+
+  labs(
+    title    = "Cost-Effectiveness Acceptability Frontier (CEAF)",
+    subtitle = "Probability that the optimal strategy is cost-effective",
+    x        = "Willingness-to-Pay Threshold (NOK thousands per QALY)",
+    y        = "Probability Cost-Effective",
+    caption  = paste0("Solid line = CEAF (optimal strategy) | ",
+                      "Dashed lines = CEAC for each strategy\n",
+                      "Grey dashed = base case ICER (NOK ",
+                      format(round(icer_base), big.mark=","), "/QALY)")
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle = element_text(color = "grey40", size = 9),
+    legend.position = "bottom"
+  )
+
+print(ceaf_plot)
+ggsave("fembloc_ceaf.png", ceaf_plot, width = 10, height = 6, dpi = 300, bg = "white")
+
+# -----------------------------------------------------------------------------
+# 7. INMB BY AGE GROUP AT KEY WTP THRESHOLDS
+# -----------------------------------------------------------------------------
+wtp_thresholds <- c(100000, 200000, 300000, 500000)
+
+inmb_age <- do.call(rbind, lapply(age_groups$group, function(grp) {
+  i     <- which(age_groups$group == grp)
+  inc_c <- psa_age_cost_fb[, i] - psa_age_cost_tl[, i]
+  inc_q <- psa_age_qaly_fb[, i] - psa_age_qaly_tl[, i]
+
+  do.call(rbind, lapply(wtp_thresholds, function(wtp) {
+    inmb <- wtp * inc_q - inc_c
+    data.frame(
+      Age_Group = grp,
+      WTP       = paste0("NOK ", format(wtp, big.mark = ",")),
+      Mean_INMB = round(mean(inmb)),
+      CI_low    = round(quantile(inmb, 0.025)),
+      CI_high   = round(quantile(inmb, 0.975)),
+      Prob_CE   = round(mean(inmb > 0) * 100, 1)
+    )
+  }))
+}))
+
+cat("\n========== INMB BY AGE GROUP ==========\n")
+print(inmb_age)
+
+rownames(inmb_age) <- NULL
+inmb_age$WTP <- paste0("NOK ", format(wtp_thresholds, big.mark = ",", scientific = FALSE))
+
+kable(inmb_age,
+      caption = "Incremental Net Monetary Benefit by Age Group (NOK)",
+      col.names = c("Age Group", "WTP Threshold",
+                    "Mean INMB", "95% CI Low", "95% CI High",
+                    "% Cost-Effective")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) |>
+  collapse_rows(columns = 1)
+
+# -----------------------------------------------------------------------------
+# 8. SAVE
+# -----------------------------------------------------------------------------
+save.image("fembloc_psa.RData")
+
+# -----------------------------------------------------------------------------
+# CONVERGENCE CHECK
+# Verifies that n=10,000 simulations is sufficient for stable PSA estimates.
+# Plots running mean ICER and running % cost-effective at NOK 500,000/QALY.
+# -----------------------------------------------------------------------------
+
+# Running (cumulative) mean ICER — exclude non-finite values
+psa_icer_clean <- ifelse(is.finite(psa_icer), psa_icer, NA)
+running_icer   <- cumsum(ifelse(is.na(psa_icer_clean), 0, psa_icer_clean)) /
+                  cumsum(!is.na(psa_icer_clean))
+
+# Running % cost-effective at NOK 500,000/QALY
+wtp_check      <- 500000
+running_pce    <- cumsum(psa_inc_cost < wtp_check * psa_inc_qaly) / seq_along(psa_inc_cost)
+
+# Combine into data frame
+conv_df <- data.frame(
+  sim        = 1:n_sim,
+  icer       = running_icer,
+  pct_ce     = running_pce * 100
+)
+
+# --- Plot 1: Running mean ICER ---
+conv_icer <- ggplot(conv_df, aes(x = sim, y = icer)) +
+  geom_line(color = "#1B3A6B", linewidth = 0.6) +
+  geom_hline(yintercept = mean(psa_icer[is.finite(psa_icer)]),
+             linetype = "dashed", color = "#CC0000", linewidth = 0.6) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "PSA Convergence — Running Mean ICER",
+    subtitle = "Red dashed line = final mean ICER",
+    x        = "Number of simulations",
+    y        = "Cumulative mean ICER (NOK/QALY)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle = element_text(color = "grey40", size = 9)
+  )
+
+# --- Plot 2: Running % cost-effective ---
+conv_pce <- ggplot(conv_df, aes(x = sim, y = pct_ce)) +
+  geom_line(color = "#1B3A6B", linewidth = 0.6) +
+  geom_hline(yintercept = tail(running_pce, 1) * 100,
+             linetype = "dashed", color = "#CC0000", linewidth = 0.6) +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(limits = c(0, 100),
+                     breaks = seq(0, 100, by = 10)) +
+  labs(
+    title    = "PSA Convergence — Running % Cost-Effective",
+    subtitle = paste0("WTP = NOK 500,000/QALY | Red dashed = final value (",
+                      round(tail(running_pce, 1) * 100, 1), "%)"),
+    x        = "Number of simulations",
+    y        = "Cumulative % simulations cost-effective"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle = element_text(color = "grey40", size = 9)
+  )
+
+print(conv_icer)
+print(conv_pce)
+
+ggsave("fembloc_convergence_icer.png", conv_icer,
+       width = 10, height = 5, dpi = 300, bg = "white")
+ggsave("fembloc_convergence_pce.png",  conv_pce,
+       width = 10, height = 5, dpi = 300, bg = "white")
+
+cat("Convergence plots saved.\n")
+cat("Final running mean ICER:        ", round(tail(running_icer, 1)), "\n")
+cat("Final running % cost-effective: ", round(tail(running_pce, 1) * 100, 1), "%\n")
+
+#------------------------------------------------------------------------------
+#Gewekwe simulation here to provide further validity to convergence. i.e comparing first 20% simulations to last 50% simulations + p-values
+#-----------------------------------------------------------------------------
+
+library(coda)
+
+# Convert to mcmc objects
+cost_mcmc <- mcmc(psa_inc_cost)
+qaly_mcmc <- mcmc(psa_inc_qaly)
+icer_mcmc <- mcmc(psa_icer[is.finite(psa_icer)])
+
+# Effective sample size
+ess_cost <- effectiveSize(cost_mcmc)
+ess_qaly <- effectiveSize(qaly_mcmc)
+ess_icer <- effectiveSize(icer_mcmc)
+
+# Geweke diagnostic
+geweke_cost <- geweke.diag(cost_mcmc)
+geweke_qaly <- geweke.diag(qaly_mcmc)
+geweke_icer <- geweke.diag(icer_mcmc)
+
+# Monte Carlo standard error
+mcse_cost <- sd(psa_inc_cost) / sqrt(ess_cost)
+mcse_qaly <- sd(psa_inc_qaly) / sqrt(ess_qaly)
+mcse_icer <- sd(psa_icer[is.finite(psa_icer)]) / sqrt(ess_icer)
+
+# Print results
+cat("\n=== CONVERGENCE DIAGNOSTICS ===\n")
+cat("Effective sample size:\n")
+cat("  Cost:", round(ess_cost), "\n")
+cat("  QALY:", round(ess_qaly), "\n")
+cat("  ICER:", round(ess_icer), "\n\n")
+
+cat("Geweke z-scores (p-values):\n")
+cat("  Cost:", round(geweke_cost$z, 2), " (p =", round(2*pnorm(-abs(geweke_cost$z)), 3), ")\n")
+cat("  QALY:", round(geweke_qaly$z, 2), " (p =", round(2*pnorm(-abs(geweke_qaly$z)), 3), ")\n")
+cat("  ICER:", round(geweke_icer$z, 2), " (p =", round(2*pnorm(-abs(geweke_icer$z)), 3), ")\n\n")
+
+cat("Monte Carlo standard error:\n")
+cat("  Cost: NOK", round(mcse_cost, 0), "(", round(mcse_cost/abs(mean(psa_inc_cost))*100, 1), "% of mean)\n")
+cat("  QALY:", round(mcse_qaly, 4), "(", round(mcse_qaly/abs(mean(psa_inc_qaly))*100, 1), "% of mean)\n")
+cat("  ICER: NOK", round(mcse_icer, 0), "(", round(mcse_icer/abs(mean(psa_icer[is.finite(psa_icer)]))*100, 1), "% of mean)\n")
+
+
+```
+
+
+```{r evppi, cache=TRUE, dependson="psa"}
+
+library(mgcv)     
+library(tidyr)
+library(dplyr)
+
+# -----------------------------------------------------------------------------
+# 1. SETUP
+# EVPPI = mean(max fitted NMB) - max(mean NMB)
+# -----------------------------------------------------------------------------
+
+wtp_evppi <- seq(0, 500000, by = 25000)
+
+cat("Re-running PSA with parameter draws saved for EVPPI...\n")
+set.seed(123)
+n_evppi <- 10000   # use same n as PSA
+
+# Storage for parameter draws
+draws <- data.frame(
+  p_fail_fb   = numeric(n_evppi),
+  device_cost = numeric(n_evppi),
+  u_pc        = numeric(n_evppi),
+  u_up        = numeric(n_evppi),
+  p_confirm   = numeric(n_evppi),
+  fr_25_29    = numeric(n_evppi),
+  fr_30_34    = numeric(n_evppi),
+  fr_35_39    = numeric(n_evppi),
+  fr_40_44    = numeric(n_evppi),
+  fr_45_50    = numeric(n_evppi)
+)
+
+# Storage for NMB per simulation (aggregated)
+nmb_fb_mat <- matrix(NA, n_evppi, length(wtp_evppi))
+nmb_tl_mat <- matrix(NA, n_evppi, length(wtp_evppi))
+
+pb2 <- txtProgressBar(min = 0, max = n_evppi, style = 3)
+
+for (s in 1:n_evppi) {
+
+  p <- draw_psa_params()
+
+  # Save draws
+  draws$p_fail_fb[s]   <- p$p_fail_fb
+  # Device cost drawn directly from Gamma distribution.
+  # (A previous version attempted to back-calculate from p$fb_cost,
+  #  but that expression was immediately overwritten — removed as dead code.)
+  draws$device_cost[s] <- rgamma(1,
+                                  shape = g_device_a,
+                                  rate  = gamma_rate(g_device_a, g_device_m))
+  draws$u_pc[s]        <- p$u_pc
+  draws$u_up[s]        <- p$u_up
+  draws$p_confirm[s]   <- p$p_confirm
+  draws$fr_25_29[s]    <- p$fr["25-29"]
+  draws$fr_30_34[s]    <- p$fr["30-34"]
+  draws$fr_35_39[s]    <- p$fr["35-39"]
+  draws$fr_40_44[s]    <- p$fr["40-44"]
+  draws$fr_45_50[s]    <- p$fr["45-50"]
+
+  # Run model for all age groups
+  cost_fb_s <- cost_tl_s <- qaly_fb_s <- qaly_tl_s <- numeric(nrow(age_groups))
+
+  for (i in 1:nrow(age_groups)) {
+    ag  <- age_groups[i, ]
+    fb  <- run_psa_arm("fembloc", ag, p)
+    tl  <- run_psa_arm("tl",      ag, p)
+    cost_fb_s[i] <- fb$cost
+    cost_tl_s[i] <- tl$cost
+    qaly_fb_s[i] <- fb$qaly
+    qaly_tl_s[i] <- tl$qaly
+  }
+
+  # Weighted aggregate
+  tc_fb <- sum(cost_fb_s * age_groups$prop)
+  tc_tl <- sum(cost_tl_s * age_groups$prop)
+  tq_fb <- sum(qaly_fb_s * age_groups$prop)
+  tq_tl <- sum(qaly_tl_s * age_groups$prop)
+
+  # NMB at each WTP
+  for (w in seq_along(wtp_evppi)) {
+    wtp <- wtp_evppi[w]
+    nmb_fb_mat[s, w] <- wtp * tq_fb - tc_fb
+    nmb_tl_mat[s, w] <- wtp * tq_tl - tc_tl
+  }
+
+  setTxtProgressBar(pb2, s)
+}
+close(pb2)
+
+# -----------------------------------------------------------------------------
+# 2. EVPPI CALCULATION FUNCTION
+# For each parameter group:
+#   - Fit GAM: NMB_incremental ~ s(param1) + s(param2) + ...
+#   - EVPPI = E[max(0, fitted_NMB)] - max(0, E[NMB])
+# -----------------------------------------------------------------------------
+
+calc_evppi <- function(param_cols, wtp_vec,
+                        nmb_fb, nmb_tl, draw_df) {
+
+  inc_nmb <- nmb_fb - nmb_tl   # n_sim x n_wtp matrix
+
+  evppi_vec <- numeric(length(wtp_vec))
+
+  for (w in seq_along(wtp_vec)) {
+
+    y <- inc_nmb[, w]
+
+    # Build GAM formula dynamically
+    if (length(param_cols) == 1) {
+      gam_formula <- as.formula(paste("y ~ s(", param_cols, ")"))
+    } else {
+      smooth_terms <- paste0("s(", param_cols, ")", collapse = " + ")
+      gam_formula  <- as.formula(paste("y ~", smooth_terms))
+    }
+
+    gam_data <- as.data.frame(draw_df[, param_cols, drop = FALSE])
+    gam_data$y <- y
+
+    # Fit GAM
+    tryCatch({
+      fit <- gam(gam_formula, data = gam_data)
+      fitted_nmb <- fitted(fit)
+
+      # EVPPI = E[max over strategies of fitted NMB] - max(E[NMB])
+      # For 2 strategies: max(0, fitted_inc_NMB)
+      evppi_vec[w] <- mean(pmax(0, fitted_nmb)) - max(0, mean(y))
+
+    }, error = function(e) {
+      evppi_vec[w] <<- NA
+      warning(paste("GAM failed at WTP", wtp_vec[w], ":", e$message))
+    })
+  }
+
+  evppi_vec
+}
+
+# -----------------------------------------------------------------------------
+# 3. CALCULATE EVPPI FOR EACH PARAMETER GROUP
+# -----------------------------------------------------------------------------
+
+cat("\nCalculating EVPPI for 5 parameter groups...\n")
+
+# EVPI (perfect info on all parameters) — upper bound
+evpi_vec <- sapply(seq_along(wtp_evppi), function(w) {
+  y <- nmb_fb_mat[, w] - nmb_tl_mat[, w]
+  mean(pmax(0, y)) - max(0, mean(y))
+})
+
+cat("  Group 1: FemBloc fail rate...\n")
+evppi_fail <- calc_evppi("p_fail_fb", wtp_evppi,
+                          nmb_fb_mat, nmb_tl_mat, draws)
+
+cat("  Group 2: FemBloc device cost...\n")
+evppi_device <- calc_evppi("device_cost", wtp_evppi,
+                            nmb_fb_mat, nmb_tl_mat, draws)
+
+cat("  Group 3: Utility values (u_pc + u_up)...\n")
+evppi_utility <- calc_evppi(c("u_pc", "u_up"), wtp_evppi,
+                             nmb_fb_mat, nmb_tl_mat, draws)
+
+cat("  Group 4: Confirmation rate...\n")
+evppi_confirm <- calc_evppi("p_confirm", wtp_evppi,
+                             nmb_fb_mat, nmb_tl_mat, draws)
+
+cat("  Group 5: Fecundity ratios...\n")
+evppi_fr <- calc_evppi(c("fr_25_29", "fr_30_34", "fr_35_39",
+                          "fr_40_44", "fr_45_50"),
+                        wtp_evppi, nmb_fb_mat, nmb_tl_mat, draws)
+
+# -----------------------------------------------------------------------------
+# 4. SUMMARY TABLE AT KEY WTP THRESHOLDS
+# -----------------------------------------------------------------------------
+
+key_wtp   <- c(100000, 200000, 300000, 500000)
+key_idx   <- match(key_wtp, wtp_evppi)
+
+evppi_summary <- data.frame(
+  Parameter_Group   = c("EVPI (all parameters)",
+                         "FemBloc fail rate",
+                         "FemBloc device cost",
+                         "Utility values",
+                         "Confirmation rate",
+                         "Fecundity ratios"),
+  WTP_100k = round(c(evpi_vec[key_idx[1]],
+                      evppi_fail[key_idx[1]],
+                      evppi_device[key_idx[1]],
+                      evppi_utility[key_idx[1]],
+                      evppi_confirm[key_idx[1]],
+                      evppi_fr[key_idx[1]])),
+  WTP_200k = round(c(evpi_vec[key_idx[2]],
+                      evppi_fail[key_idx[2]],
+                      evppi_device[key_idx[2]],
+                      evppi_utility[key_idx[2]],
+                      evppi_confirm[key_idx[2]],
+                      evppi_fr[key_idx[2]])),
+  WTP_300k = round(c(evpi_vec[key_idx[3]],
+                      evppi_fail[key_idx[3]],
+                      evppi_device[key_idx[3]],
+                      evppi_utility[key_idx[3]],
+                      evppi_confirm[key_idx[3]],
+                      evppi_fr[key_idx[3]])),
+  WTP_500k = round(c(evpi_vec[key_idx[4]],
+                      evppi_fail[key_idx[4]],
+                      evppi_device[key_idx[4]],
+                      evppi_utility[key_idx[4]],
+                      evppi_confirm[key_idx[4]],
+                      evppi_fr[key_idx[4]]))
+)
+
+cat("\n========== EVPPI SUMMARY (NOK per patient) ==========\n")
+print(evppi_summary)
+
+kable(evppi_summary,
+      caption = "EVPPI by parameter group at key WTP thresholds (NOK per patient)",
+      col.names = c("Parameter Group",
+                    "NOK 100,000", "NOK 200,000",
+                    "NOK 300,000", "NOK 500,000")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) |>
+  row_spec(1, bold = TRUE, background = "#f0f0f0")
+
+# -----------------------------------------------------------------------------
+# 5. EVPPI CURVE PLOT
+# -----------------------------------------------------------------------------
+
+evppi_long <- data.frame(
+  wtp   = rep(wtp_evppi / 1000, 6),
+  evppi = c(evpi_vec,
+            evppi_fail,
+            evppi_device,
+            evppi_utility,
+            evppi_confirm,
+            evppi_fr),
+  group = rep(c("EVPI (all parameters)",
+                "FemBloc fail rate",
+                "FemBloc device cost",
+                "Utility values",
+                "Confirmation rate",
+                "Fecundity ratios"),
+              each = length(wtp_evppi))
+)
+
+evppi_long$group <- factor(evppi_long$group,
+  levels = c("EVPI (all parameters)",
+             "FemBloc fail rate",
+             "FemBloc device cost",
+             "Utility values",
+             "Confirmation rate",
+             "Fecundity ratios"))
+
+evppi_plot <- ggplot(evppi_long,
+                     aes(x = wtp, y = evppi,
+                         color    = group,
+                         linetype = group,
+                         linewidth = group)) +
+  geom_line() +
+  geom_vline(xintercept = icer_base / 1000,
+             linetype = "dashed", color = "grey50",
+             linewidth = 0.6) +
+  scale_color_manual(values = c(
+    "EVPI (all parameters)" = "black",
+    "FemBloc fail rate"     = "#CC0000",
+    "FemBloc device cost"   = "#1B3A6B",
+    "Utility values"        = "#2E8B57",
+    "Confirmation rate"     = "#F39C12",
+    "Fecundity ratios"      = "#9B59B6"
+  )) +
+  scale_linetype_manual(values = c(
+    "EVPI (all parameters)" = "solid",
+    "FemBloc fail rate"     = "solid",
+    "FemBloc device cost"   = "solid",
+    "Utility values"        = "dashed",
+    "Confirmation rate"     = "dashed",
+    "Fecundity ratios"      = "dashed"
+  )) +
+  scale_linewidth_manual(values = c(
+    "EVPI (all parameters)" = 1.2,
+    "FemBloc fail rate"     = 1.0,
+    "FemBloc device cost"   = 1.0,
+    "Utility values"        = 0.7,
+    "Confirmation rate"     = 0.7,
+    "Fecundity ratios"      = 0.7
+  )) +
+  scale_x_continuous(breaks = seq(0, 500, by = 100)) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "Expected Value of Partial Perfect Information (EVPPI)",
+    subtitle = "Value of eliminating uncertainty by parameter group",
+    x        = "Willingness-to-Pay Threshold (NOK thousands per QALY)",
+    y        = "EVPPI (NOK per patient)",
+    color    = "Parameter Group",
+    linetype = "Parameter Group",
+    linewidth = "Parameter Group",
+    caption  = "Grey dashed line = base case ICER | Solid lines = high-priority groups"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle   = element_text(color = "grey40", size = 9),
+    legend.position = "right"
+  )
+
+print(evppi_plot)
+ggsave("fembloc_evppi.png", evppi_plot, width = 10, height = 6, dpi = 300, bg = "white")
+
+# -----------------------------------------------------------------------------
+# 6. EVPPI AS % OF EVPI AT BASE CASE ICER
+# -----------------------------------------------------------------------------
+
+base_idx <- which.min(abs(wtp_evppi - icer_base))
+
+evppi_pct <- data.frame(
+  Parameter_Group = c("FemBloc fail rate",
+                       "FemBloc device cost",
+                       "Utility values",
+                       "Confirmation rate",
+                       "Fecundity ratios"),
+  EVPPI_NOK = round(c(evppi_fail[base_idx],
+                       evppi_device[base_idx],
+                       evppi_utility[base_idx],
+                       evppi_confirm[base_idx],
+                       evppi_fr[base_idx])),
+  Pct_of_EVPI = round(c(evppi_fail[base_idx],
+                          evppi_device[base_idx],
+                          evppi_utility[base_idx],
+                          evppi_confirm[base_idx],
+                          evppi_fr[base_idx]) /
+                        evpi_vec[base_idx] * 100, 1)
+)
+
+evppi_pct <- evppi_pct[order(-evppi_pct$EVPPI_NOK), ]
+
+cat("\n========== EVPPI AT BASE CASE ICER (NOK",
+    format(round(icer_base), big.mark = ","), ") ==========\n")
+cat("EVPI:", round(evpi_vec[base_idx]), "NOK per patient\n\n")
+print(evppi_pct)
+
+kable(evppi_pct,
+      caption = paste0("EVPPI at base case ICER (NOK ",
+                       format(round(icer_base), big.mark = ","),
+                       "/QALY) as proportion of EVPI"),
+      col.names = c("Parameter Group",
+                    "EVPPI (NOK/patient)",
+                    "% of EVPI")) |>
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+
+# Save
+save.image("fembloc_evppi.RData")
+cat("\nEVPPI complete. Results saved to fembloc_evppi.RData\n")
+
+```
+
+
+#SCENARIO ANALYSIS
+#------------------------------------------------------------------------------
+```{r Scenarios}
+
+fembloc_total_cost <- fembloc_cost_cycle0
+tl_total_cost      <- tl_cost_cycle0
+fr_means           <- setNames(fr$fr_mean, fr$group)
+
+# UP state costs named vector
+up_state_costs <- setNames(
+  as.vector(up_probs %*% c(cost_live_birth, cost_induced_abortion,
+                            cost_miscarriage, cost_ectopic_pregnancy)),
+  age_groups$group
+)
+
+# Cycle 0 cost vectors — one value per age group (replicated)
+fembloc_c0_vec <- rep(fembloc_total_cost, nrow(age_groups))
+tl_c0_vec      <- rep(tl_total_cost,      nrow(age_groups))
+
+# -----------------------------------------------------------------------------
+# RUN-SCENARIO FUNCTION
+# -----------------------------------------------------------------------------
+run_scenario <- function(
+    p_fail_fb_sc = p_fail_fembloc,
+    p_fail_tl_sc = p_fail_tl,
+    fb_c0_vec_sc = fembloc_c0_vec,   # vector length = nrow(age_groups)
+    tl_c0_vec_sc = tl_c0_vec,
+    up_costs_sc  = up_state_costs,
+    crossover    = FALSE,
+    label        = "Scenario"
+) {
+
+  res <- lapply(1:nrow(age_groups), function(i) {
+    ag       <- age_groups[i, ]
+    horizon  <- ag$horizon
+    mid_age  <- ag$midpoint
+    disc_r   <- ag$disc_rate
+    grp      <- ag$group
+    fr_start <- fr_means[grp]
+
+    costs_fb <- numeric(horizon)
+    qalys_fb <- numeric(horizon)
+
+    # ---- FemBloc arm ----
+    if (crossover) {
+      prop_pc_conf <- p_confirmed
+      prop_up_conf <- 0
+      prop_pc_uncf <- p_unconfirmed
+      prop_up_uncf <- 0
+      c0_fb <- p_confirmed * fb_c0_vec_sc[i] + p_unconfirmed * tl_c0_vec_sc[i]
+
+      for (cycle in 1:horizon) {
+        current_age <- mid_age + (cycle - 1)
+        current_grp <- ifelse(current_age < 30, "25-29",
+                       ifelse(current_age < 35, "30-34",
+                       ifelse(current_age < 40, "35-39",
+                       ifelse(current_age < 45, "40-44", "45-50"))))
+        fr_c        <- fr_means[current_grp]
+        up_cost_now <- up_costs_sc[current_grp]
+        disc_f      <- 1 / (1 + disc_r)^cycle
+        hcc         <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+
+        u_conf    <- if (cycle == 1) u_pc - u_ae_fembloc else u_pc
+        qaly_conf <- (prop_pc_conf * u_conf + prop_up_conf * u_up) * hcc * disc_f
+        cost_conf <- prop_up_conf * up_cost_now * disc_f
+        new_up_conf  <- prop_pc_conf * p_fail_fb_sc * fr_c
+        prop_pc_conf <- prop_pc_conf * (1 - p_fail_fb_sc * fr_c) + prop_up_conf
+        prop_up_conf <- new_up_conf
+
+        u_uncf    <- if (cycle == 1) u_pc - u_ae_tl else u_pc
+        qaly_uncf <- (prop_pc_uncf * u_uncf + prop_up_uncf * u_up) * hcc * disc_f
+        cost_uncf <- prop_up_uncf * up_cost_now * disc_f
+        new_up_uncf  <- prop_pc_uncf * p_fail_tl_sc * fr_c
+        prop_pc_uncf <- prop_pc_uncf * (1 - p_fail_tl_sc * fr_c) + prop_up_uncf
+        prop_up_uncf <- new_up_uncf
+
+        qalys_fb[cycle] <- qaly_conf + qaly_uncf
+        costs_fb[cycle] <- cost_conf + cost_uncf
+      }
+
+    } else {
+      prop_pc_fb <- p_confirmed + p_unconfirmed * (1 - fr_start)
+      prop_up_fb <- p_unconfirmed * fr_start
+      c0_fb      <- fb_c0_vec_sc[i]
+
+      for (cycle in 1:horizon) {
+        current_age <- mid_age + (cycle - 1)
+        current_grp <- ifelse(current_age < 30, "25-29",
+                       ifelse(current_age < 35, "30-34",
+                       ifelse(current_age < 40, "35-39",
+                       ifelse(current_age < 45, "40-44", "45-50"))))
+        fr_c        <- fr_means[current_grp]
+        p_fail_adj  <- p_fail_fb_sc * fr_c
+        up_cost_now <- up_costs_sc[current_grp]
+        disc_f      <- 1 / (1 + disc_r)^cycle
+        hcc         <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+        u_c         <- if (cycle == 1) u_pc - u_ae_fembloc else u_pc
+
+        qalys_fb[cycle] <- (prop_pc_fb * u_c + prop_up_fb * u_up) * hcc * disc_f
+        costs_fb[cycle] <- prop_up_fb * up_cost_now * disc_f
+        new_up     <- prop_pc_fb * p_fail_adj
+        prop_pc_fb <- prop_pc_fb * (1 - p_fail_adj) + prop_up_fb
+        prop_up_fb <- new_up
+      }
+    }
+
+    # ---- TL arm ----
+    prop_pc_tl <- 1.0
+    prop_up_tl <- 0.0
+    costs_tl   <- numeric(horizon)
+    qalys_tl   <- numeric(horizon)
+
+    for (cycle in 1:horizon) {
+      current_age <- mid_age + (cycle - 1)
+      current_grp <- ifelse(current_age < 30, "25-29",
+                     ifelse(current_age < 35, "30-34",
+                     ifelse(current_age < 40, "35-39",
+                     ifelse(current_age < 45, "40-44", "45-50"))))
+      fr_c        <- fr_means[current_grp]
+      p_fail_adj  <- p_fail_tl_sc * fr_c
+      up_cost_now <- up_costs_sc[current_grp]
+      disc_f      <- 1 / (1 + disc_r)^cycle
+      hcc         <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+      u_c         <- if (cycle == 1) u_pc - u_ae_tl else u_pc
+
+      qalys_tl[cycle] <- (prop_pc_tl * u_c + prop_up_tl * u_up) * hcc * disc_f
+      costs_tl[cycle] <- prop_up_tl * up_cost_now * disc_f
+      new_up     <- prop_pc_tl * p_fail_adj
+      prop_pc_tl <- prop_pc_tl * (1 - p_fail_adj) + prop_up_tl
+      prop_up_tl <- new_up
+    }
+
+    list(
+      cost_fb = c0_fb            + sum(costs_fb),
+      qaly_fb = sum(qalys_fb),
+      cost_tl = tl_c0_vec_sc[i] + sum(costs_tl),
+      qaly_tl = sum(qalys_tl)
+    )
+  })
+
+  cost_fb  <- sum(sapply(res, `[[`, "cost_fb") * age_groups$prop)
+  qaly_fb  <- sum(sapply(res, `[[`, "qaly_fb") * age_groups$prop)
+  cost_tl  <- sum(sapply(res, `[[`, "cost_tl") * age_groups$prop)
+  qaly_tl  <- sum(sapply(res, `[[`, "qaly_tl") * age_groups$prop)
+  inc_cost <- cost_fb - cost_tl
+  inc_qaly <- qaly_fb - qaly_tl
+  icer     <- inc_cost / inc_qaly
+
+  cat("\n---", label, "---\n")
+  cat("FemBloc  | Cost:", round(cost_fb), "| QALYs:", round(qaly_fb, 4), "\n")
+  cat("TL       | Cost:", round(cost_tl), "| QALYs:", round(qaly_tl, 4), "\n")
+  cat("Inc cost:", round(inc_cost),
+      "| Inc QALY:", round(inc_qaly, 4),
+      "| ICER:", round(icer), "\n")
+
+  list(label    = label,
+       cost_fb  = round(cost_fb),
+       qaly_fb  = round(qaly_fb, 4),
+       cost_tl  = round(cost_tl),
+       qaly_tl  = round(qaly_tl, 4),
+       inc_cost = round(inc_cost),
+       inc_qaly = round(inc_qaly, 4),
+       icer     = round(icer))
+}
+
+# -----------------------------------------------------------------------------
+# SCENARIO 1: FemBloc fail rate = 0
+# -----------------------------------------------------------------------------
+sc1 <- run_scenario(
+  p_fail_fb_sc = 0,
+  label        = "S1: FemBloc fail rate = 0"
+)
+
+# -----------------------------------------------------------------------------
+# SCENARIO 2: TL CREST 10-year cumulative fail rate
+# -----------------------------------------------------------------------------
+p_fail_tl_crest_base <- 1 - (1 - 0.0185)^(1/10)
+p_fail_tl_crest_low  <- 1 - (1 - 0.0151)^(1/10)
+p_fail_tl_crest_high <- 1 - (1 - 0.0218)^(1/10)
+
+cat("\nCREST TL annual fail rate:", round(p_fail_tl_crest_base, 6),
+    "| CI:", round(p_fail_tl_crest_low, 6),
+    "-", round(p_fail_tl_crest_high, 6), "\n")
+
+sc2_base <- run_scenario(p_fail_tl_sc = p_fail_tl_crest_base,
+                          label = "S2: TL CREST fail rate (base)")
+sc2_low  <- run_scenario(p_fail_tl_sc = p_fail_tl_crest_low,
+                          label = "S2a: TL CREST fail rate (low CI)")
+sc2_high <- run_scenario(p_fail_tl_sc = p_fail_tl_crest_high,
+                          label = "S2b: TL CREST fail rate (high CI)")
+
+# -----------------------------------------------------------------------------
+# SCENARIO 3: Alternative device cost (±30%)
+# -----------------------------------------------------------------------------
+fb_c0_low  <- rep(fembloc_total_cost - fembloc_device_cost +
+                    fembloc_device_cost * 0.70, nrow(age_groups))
+fb_c0_high <- rep(fembloc_total_cost - fembloc_device_cost +
+                    fembloc_device_cost * 1.30, nrow(age_groups))
+
+sc3_low  <- run_scenario(fb_c0_vec_sc = fb_c0_low,
+                          label = "S3a: Device cost -30%")
+sc3_high <- run_scenario(fb_c0_vec_sc = fb_c0_high,
+                          label = "S3b: Device cost +30%")
+
+# -----------------------------------------------------------------------------
+# SCENARIO 4: CREST UP outcome proportions
+# -----------------------------------------------------------------------------
+crest_raw   <- c(0.287, 0.182, 0.147, 0.329)
+crest_props <- crest_raw / sum(crest_raw)
+
+up_costs_crest <- setNames(
+  as.vector(matrix(rep(crest_props, nrow(age_groups)),
+                   nrow = nrow(age_groups), byrow = TRUE) %*%
+              c(cost_live_birth, cost_induced_abortion,
+                cost_miscarriage, cost_ectopic_pregnancy)),
+  age_groups$group
+)
+
+cat("\nCREST UP proportions (normalised):", round(crest_props, 4), "\n")
+cat("Base case UP cost (avg):", round(mean(up_state_costs)), "NOK\n")
+cat("CREST UP cost (avg):    ", round(mean(up_costs_crest)),  "NOK\n")
+
+sc4 <- run_scenario(up_costs_sc = up_costs_crest,
+                     label = "S4: CREST UP outcome proportions")
+
+# -----------------------------------------------------------------------------
+# SCENARIO 5: Unconfirmed crossover to TL
+# -----------------------------------------------------------------------------
+sc5 <- run_scenario(crossover = TRUE,
+                     label = "S5: Unconfirmed crossover to TL")
+
+# -----------------------------------------------------------------------------
+# SCENARIO 6: Subgroup ICER by age group
+# -----------------------------------------------------------------------------
+cat("\n========== S6: SUBGROUP ICER BY AGE GROUP ==========\n")
+
+subgroup_results <- do.call(rbind, lapply(1:nrow(age_groups), function(i) {
+  ag      <- age_groups[i, ]
+  horizon <- ag$horizon
+  mid_age <- ag$midpoint
+  disc_r  <- ag$disc_rate
+  grp     <- ag$group
+  fr_s    <- fr_means[grp]
+
+  prop_pc_fb <- p_confirmed + p_unconfirmed * (1 - fr_s)
+  prop_up_fb <- p_unconfirmed * fr_s
+  costs_fb   <- numeric(horizon)
+  qalys_fb   <- numeric(horizon)
+
+  for (cycle in 1:horizon) {
+    current_age <- mid_age + (cycle - 1)
+    current_grp <- ifelse(current_age < 30, "25-29",
+                   ifelse(current_age < 35, "30-34",
+                   ifelse(current_age < 40, "35-39",
+                   ifelse(current_age < 45, "40-44", "45-50"))))
+    fr_c   <- fr_means[current_grp]
+    p_fadj <- p_fail_fembloc * fr_c
+    hcc    <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+    disc_f <- 1 / (1 + disc_r)^cycle
+    u_c    <- if (cycle == 1) u_pc - u_ae_fembloc else u_pc
+
+    qalys_fb[cycle] <- (prop_pc_fb * u_c + prop_up_fb * u_up) * hcc * disc_f
+    costs_fb[cycle] <- prop_up_fb * up_state_costs[current_grp] * disc_f
+    new_up     <- prop_pc_fb * p_fadj
+    prop_pc_fb <- prop_pc_fb * (1 - p_fadj) + prop_up_fb
+    prop_up_fb <- new_up
+  }
+
+  prop_pc_tl <- 1.0
+  prop_up_tl <- 0.0
+  costs_tl   <- numeric(horizon)
+  qalys_tl   <- numeric(horizon)
+
+  for (cycle in 1:horizon) {
+    current_age <- mid_age + (cycle - 1)
+    current_grp <- ifelse(current_age < 30, "25-29",
+                   ifelse(current_age < 35, "30-34",
+                   ifelse(current_age < 40, "35-39",
+                   ifelse(current_age < 45, "40-44", "45-50"))))
+    fr_c   <- fr_means[current_grp]
+    p_fadj <- p_fail_tl * fr_c
+    hcc    <- if (cycle == 1 || cycle == horizon) 0.5 else 1.0
+    disc_f <- 1 / (1 + disc_r)^cycle
+    u_c    <- if (cycle == 1) u_pc - u_ae_tl else u_pc
+
+    qalys_tl[cycle] <- (prop_pc_tl * u_c + prop_up_tl * u_up) * hcc * disc_f
+    costs_tl[cycle] <- prop_up_tl * up_state_costs[current_grp] * disc_f
+    new_up     <- prop_pc_tl * p_fadj
+    prop_pc_tl <- prop_pc_tl * (1 - p_fadj) + prop_up_tl
+    prop_up_tl <- new_up
+  }
+
+  cost_fb  <- fembloc_total_cost + sum(costs_fb)
+  qaly_fb  <- sum(qalys_fb)
+  cost_tl  <- tl_total_cost      + sum(costs_tl)
+  qaly_tl  <- sum(qalys_tl)
+  inc_cost <- cost_fb - cost_tl
+  inc_qaly <- qaly_fb - qaly_tl
+
+  data.frame(
+    Age_Group    = grp,
+    Horizon_yrs  = horizon,
+    Cost_FemBloc = round(cost_fb),
+    Cost_TL      = round(cost_tl),
+    QALY_FemBloc = round(qaly_fb, 4),
+    QALY_TL      = round(qaly_tl, 4),
+    Inc_Cost     = round(inc_cost),
+    Inc_QALY     = round(inc_qaly, 4),
+    ICER         = round(inc_cost / inc_qaly)
+  )
+}))
+
+print(subgroup_results)
+
+# -----------------------------------------------------------------------------
+# SUMMARY TABLE
+# -----------------------------------------------------------------------------
+extr <- function(sc, nm) sc[[nm]]
+
+scenario_df <- data.frame(
+  Scenario = c("Base case",
+               "S1: FemBloc fail rate = 0",
+               "S2: TL CREST fail rate (base)",
+               "S2a: TL CREST fail rate (low CI)",
+               "S2b: TL CREST fail rate (high CI)",
+               "S3a: Device cost -30%",
+               "S3b: Device cost +30%",
+               "S4: CREST UP outcome proportions",
+               "S5: Unconfirmed crossover to TL"),
+
+  Inc_Cost = c(round(inc_cost),
+               extr(sc1,"inc_cost"),      extr(sc2_base,"inc_cost"),
+               extr(sc2_low,"inc_cost"),  extr(sc2_high,"inc_cost"),
+               extr(sc3_low,"inc_cost"),  extr(sc3_high,"inc_cost"),
+               extr(sc4,"inc_cost"),      extr(sc5,"inc_cost")),
+
+  Inc_QALY = c(round(inc_qaly, 4),
+               extr(sc1,"inc_qaly"),      extr(sc2_base,"inc_qaly"),
+               extr(sc2_low,"inc_qaly"),  extr(sc2_high,"inc_qaly"),
+               extr(sc3_low,"inc_qaly"),  extr(sc3_high,"inc_qaly"),
+               extr(sc4,"inc_qaly"),      extr(sc5,"inc_qaly")),
+
+  ICER = c(round(icer_base),
+           extr(sc1,"icer"),      extr(sc2_base,"icer"),
+           extr(sc2_low,"icer"),  extr(sc2_high,"icer"),
+           extr(sc3_low,"icer"),  extr(sc3_high,"icer"),
+           extr(sc4,"icer"),      extr(sc5,"icer"))
+)
+
+cat("\n========== SCENARIO SUMMARY ==========\n")
+print(scenario_df)
+
+kable(scenario_df,
+      caption = "Scenario Analysis Results",
+      col.names = c("Scenario", "Inc. Cost (NOK)",
+                    "Inc. QALYs", "ICER (NOK/QALY)"),
+      row.names = FALSE) |>
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+
+save.image("fembloc_scenarios.RData")
+
+
+```
+
+```{r export_tables}
+library(officer)
+library(flextable)
+
+#standard formatting for all tables
+fmt_table <- function(ft) {
+  ft |>
+    bold(part = "header") |>
+    fontsize(size = 10, part = "all") |>
+    font(fontname = "Times New Roman", part = "all") |>
+    align(align = "center", part = "header") |>
+    align(align = "left",   j = 1, part = "body") |>
+    align(align = "center", j = -1, part = "body") |>
+    bg(bg = "#1B3A6B", part = "header") |>
+    color(color = "white", part = "header") |>
+    border_outer(part = "all") |>
+    border_inner_h(part = "body") |>
+    autofit()
+}
+
+# -----------------------------------------------------------------------------
+# TABLE 1: BASE CASE RESULTS — QALY AND UP-BASED ANALYSIS
+# No WTP threshold exists for cost per UP avoided; presented as supplementary
+# decision-relevant metric alongside the QALY ICER.
+# -----------------------------------------------------------------------------
+
+# Deterministic UP summary values
+total_up_fembloc <- up_fembloc   # already per average woman (prop-weighted)
+total_up_tl      <- up_tl
+inc_up_det       <- total_up_fembloc - total_up_tl  # negative = FemBloc has more UPs
+
+# PSA UP summary
+psa_cpu_finite <- psa_cost_per_up[is.finite(psa_cost_per_up)]
+
+base_case_df <- data.frame(
+  Outcome = c(
+    "Total cost (NOK)",
+    "Total QALYs",
+    "Unintended pregnancies (per average woman)",
+    "Incremental cost (NOK)",
+    "Incremental QALYs",
+    "Incremental UPs (FemBloc\u00ae vs TL)",
+    "ICER — NOK per QALY gained",
+    "ICER — NOK per UP avoided (TL vs FemBloc\u00ae)"
+  ),
+  FemBloc = c(
+    format(round(agg_cost_fembloc), big.mark = ","),
+    round(agg_qaly_fembloc, 4),
+    round(total_up_fembloc, 4),
+    "—", "—", "—", "—", "—"
+  ),
+  TL = c(
+    format(round(agg_cost_tl), big.mark = ","),
+    round(agg_qaly_tl, 4),
+    round(total_up_tl, 4),
+    "—", "—", "—", "—", "—"
+  ),
+  Incremental = c(
+    "—", "—", "—",
+    format(round(inc_cost),    big.mark = ","),
+    round(inc_qaly, 4),
+    round(inc_up_det, 4),
+    format(round(icer_base),   big.mark = ","),
+    format(round(icer_up),     big.mark = ",")
+  )
+)
+
+ft1 <- flextable(base_case_df) |>
+  set_header_labels(
+    Outcome     = "Outcome",
+    FemBloc     = "FemBloc\u00ae",
+    TL          = "Tubal Ligation",
+    Incremental = "Incremental"
+  ) |>
+  set_caption(paste0("Table 1. Base case cost-effectiveness results — ",
+                     "QALY-based and unintended pregnancy-based analysis")) |>
+  bold(i = c(7, 8), j = 4, part = "body") |>   # bold both ICERs
+  fmt_table()
+
+# -----------------------------------------------------------------------------
+# TABLE 2: SCENARIO ANALYSIS SUMMARY
+# -----------------------------------------------------------------------------
+scenario_export <- scenario_df
+scenario_export$Inc_Cost <- format(scenario_export$Inc_Cost, big.mark = ",")
+scenario_export$ICER     <- ifelse(scenario_export$ICER < 0,
+                                    paste0(format(scenario_export$ICER,
+                                                  big.mark = ","),
+                                           " (Dominant)"),
+                                    format(scenario_export$ICER,
+                                           big.mark = ","))
+
+ft2 <- flextable(scenario_export) |>
+  set_header_labels(
+    Scenario = "Scenario",
+    Inc_Cost = "Incremental Cost (NOK)",
+    Inc_QALY = "Incremental QALYs",
+    ICER     = "ICER (NOK/QALY)"
+  ) |>
+  set_caption("Table 2. Scenario analysis results") |>
+  bold(i = 1, part = "body") |>   # bold base case row
+  fmt_table()
+
+# -----------------------------------------------------------------------------
+# TABLE 3: SUBGROUP ICER BY AGE GROUP
+# -----------------------------------------------------------------------------
+# TABLE 3a: SUBGROUP COSTS
+# -----------------------------------------------------------------------------
+subgroup_3a <- subgroup_results[, c("Age_Group", "Horizon_yrs",
+                                     "Cost_FemBloc", "Cost_TL",
+                                     "Inc_Cost")]
+subgroup_3a$Cost_FemBloc <- format(subgroup_3a$Cost_FemBloc, big.mark = ",")
+subgroup_3a$Cost_TL      <- format(subgroup_3a$Cost_TL,      big.mark = ",")
+subgroup_3a$Inc_Cost     <- format(subgroup_3a$Inc_Cost,     big.mark = ",")
+
+ft3a <- flextable(subgroup_3a) |>
+  set_header_labels(
+    Age_Group    = "Age Group",
+    Horizon_yrs  = "Horizon (years)",
+    Cost_FemBloc = "Cost FemBloc\u00ae (NOK)",
+    Cost_TL      = "Cost TL (NOK)",
+    Inc_Cost     = "Incremental Cost (NOK)"
+  ) |>
+  set_caption("Table 3a. Subgroup analysis: costs by age group") |>
+  fmt_table()
+
+# -----------------------------------------------------------------------------
+# TABLE 3b: SUBGROUP EFFECTIVENESS AND ICER
+# -----------------------------------------------------------------------------
+subgroup_3b <- subgroup_results[, c("Age_Group", "QALY_FemBloc",
+                                     "QALY_TL", "Inc_QALY", "ICER")]
+subgroup_3b$ICER <- format(subgroup_3b$ICER, big.mark = ",")
+
+ft3b <- flextable(subgroup_3b) |>
+  set_header_labels(
+    Age_Group    = "Age Group",
+    QALY_FemBloc = "QALYs FemBloc\u00ae",
+    QALY_TL      = "QALYs TL",
+    Inc_QALY     = "Incremental QALYs",
+    ICER         = "ICER (NOK/QALY)"
+  ) |>
+  set_caption("Table 3b. Subgroup analysis: effectiveness and ICER by age group") |>
+  fmt_table()
+# -----------------------------------------------------------------------------
+# TABLE 4: INMB BY AGE GROUP
+# -----------------------------------------------------------------------------
+inmb_export <- inmb_age
+rownames(inmb_export) <- NULL
+inmb_export$Mean_INMB <- format(inmb_export$Mean_INMB, big.mark = ",")
+inmb_export$CI_low    <- format(inmb_export$CI_low,    big.mark = ",")
+inmb_export$CI_high   <- format(inmb_export$CI_high,   big.mark = ",")
+inmb_export$CI        <- paste0("(", inmb_export$CI_low,
+                                 " to ", inmb_export$CI_high, ")")
+inmb_export           <- inmb_export[, c("Age_Group", "WTP",
+                                          "Mean_INMB", "CI", "Prob_CE")]
+
+ft4 <- flextable(inmb_export) |>
+  set_header_labels(
+    Age_Group = "Age Group",
+    WTP       = "WTP Threshold",
+    Mean_INMB = "Mean INMB (NOK)",
+    CI        = "95% CI (NOK)",
+    Prob_CE   = "Probability Cost-Effective (%)"
+  ) |>
+  set_caption(paste0("Table 4. Incremental net monetary benefit (INMB) ",
+                     "by age group at key willingness-to-pay thresholds")) |>
+  fmt_table()
+
+# -----------------------------------------------------------------------------
+# TABLE 5: DSA RESULTS
+# -----------------------------------------------------------------------------
+dsa_export <- dsa_results[order(-dsa_results$swing),
+                           c("parameter", "icer_low",
+                             "icer_high", "swing")]
+dsa_export$icer_low  <- ifelse(dsa_export$icer_low < 0, "Dominated",
+                                format(round(dsa_export$icer_low),
+                                       big.mark = ","))
+dsa_export$icer_high <- ifelse(dsa_export$icer_high < 0, "Dominated",
+                                format(round(dsa_export$icer_high),
+                                       big.mark = ","))
+dsa_export$swing     <- format(round(dsa_export$swing), big.mark = ",")
+
+ft5 <- flextable(dsa_export) |>
+  set_header_labels(
+    parameter = "Parameter",
+    icer_low  = "ICER — Low bound (NOK/QALY)",
+    icer_high = "ICER — High bound (NOK/QALY)",
+    swing     = "Swing (NOK/QALY)"
+  ) |>
+  set_caption(paste0("Table 5. One-way sensitivity analysis results ",
+                     "(ordered by swing)")) |>
+  fmt_table()
+
+# -----------------------------------------------------------------------------
+# TABLE 6: EVPPI SUMMARY
+# -----------------------------------------------------------------------------
+evppi_export <- evppi_summary
+evppi_export[, 2:5] <- lapply(evppi_export[, 2:5],
+                               function(x) format(x, big.mark = ","))
+
+ft6 <- flextable(evppi_export) |>
+  set_header_labels(
+    Parameter_Group = "Parameter Group",
+    WTP_100k        = "NOK 100,000/QALY",
+    WTP_200k        = "NOK 200,000/QALY",
+    WTP_300k        = "NOK 300,000/QALY",
+    WTP_500k        = "NOK 500,000/QALY"
+  ) |>
+  add_header_row(
+    values = c("", "EVPPI (NOK per patient) at WTP threshold"),
+    colwidths = c(1, 4)
+  ) |>
+  bold(i = 1, part = "header") |>
+  set_caption(paste0("Table 6. Expected value of partial perfect ",
+                     "information (EVPPI) by parameter group")) |>
+  bold(i = 1, part = "body") |>   # bold EVPI row
+  fmt_table()
+
+# -----------------------------------------------------------------------------
+# EXPORT ALL TO SINGLE WORD DOCUMENT
+# -----------------------------------------------------------------------------
+doc <- read_docx() |>
+
+  body_add_par("FemBloc CEA — Results Tables", style = "heading 1") |>
+  body_add_par("", style = "Normal") |>
+
+  body_add_flextable(ft1) |>
+  body_add_par("", style = "Normal") |>
+  body_add_break() |>
+
+  body_add_flextable(ft2) |>
+  body_add_par("", style = "Normal") |>
+  body_add_break() |>
+
+  body_add_flextable(ft3a) |>
+  body_add_par("", style = "Normal") |>
+  body_add_flextable(ft3b) |>
+  body_add_par("", style = "Normal") |>
+  body_add_break() |>
+
+  body_add_flextable(ft4) |>
+  body_add_par("", style = "Normal") |>
+  body_add_break() |>
+
+  body_add_flextable(ft5) |>
+  body_add_par("", style = "Normal") |>
+  body_add_break() |>
+
+  body_add_flextable(ft6)
+
+# -----------------------------------------------------------------------------
+# TABLE 7: COST PER UP AVOIDED — DETERMINISTIC + PSA
+# -----------------------------------------------------------------------------
+ft7 <- flextable(data.frame(
+  Outcome = c(
+    "Total UPs — FemBloc® (per average woman)",
+    "Total UPs — Tubal Ligation (per average woman)",
+    "Incremental UPs (FemBloc® vs TL)",
+    "Incremental cost per UP avoided — Deterministic (NOK)",
+    "Incremental cost per UP avoided — PSA mean (NOK)",
+    "PSA 95% CI (NOK)"
+  ),
+  Value = c(
+    round(total_up_fembloc, 4),
+    round(total_up_tl,      4),
+    round(inc_up_det,       4),
+    format(round(icer_up),  big.mark = ","),
+    format(round(mean(psa_cpu_finite)), big.mark = ","),
+    paste0(format(round(quantile(psa_cpu_finite, 0.025)), big.mark = ","),
+           " to ",
+           format(round(quantile(psa_cpu_finite, 0.975)), big.mark = ","))
+  )
+)) |>
+  set_header_labels(Outcome = "Outcome", Value = "Value") |>
+  set_caption("Table 7. Incremental cost per unintended pregnancy avoided") |>
+  fmt_table()
+
+# -----------------------------------------------------------------------------
+# FIGURE: CE PLANE — INCREMENTAL COST vs UPs AVOIDED
+# No WTP threshold line — reference cost-per-UP lines shown instead.
+# -----------------------------------------------------------------------------
+ce_up_data <- data.frame(
+  inc_cost = psa_inc_cost,
+  inc_up   = psa_up_fb - psa_up_tl
+)
+
+ce_up_plane <- ggplot(ce_up_data, aes(x = inc_up, y = inc_cost)) +
+  geom_point(alpha = 0.10, size = 0.7, color = "#1B3A6B") +
+  geom_hline(yintercept = 0, color = "grey40", linewidth = 0.6) +
+  geom_vline(xintercept = 0, color = "grey40", linewidth = 0.6) +
+  geom_abline(slope = -10000, intercept = 0,
+              linetype = "dashed", color = "#F39C12", linewidth = 0.6) +
+  geom_abline(slope = -25000, intercept = 0,
+              linetype = "dashed", color = "#E74C3C", linewidth = 0.6) +
+  geom_abline(slope = -50000, intercept = 0,
+              linetype = "dashed", color = "#9B59B6", linewidth = 0.6) +
+  annotate("point", x = inc_up_det, y = inc_cost,
+           color = "#CC0000", size = 4, shape = 18) +
+  annotate("text",  x = inc_up_det, y = inc_cost,
+           label = paste0("Base case\nNOK ",
+                          format(round(icer_up), big.mark = ","),
+                          "/UP avoided"),
+           hjust = -0.1, vjust = 0.5, size = 3, color = "#CC0000") +
+  scale_x_continuous(labels = scales::comma) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(
+    title    = "Cost-Effectiveness Plane — Unintended Pregnancies",
+    subtitle = paste0("10,000 PSA simulations | Base case: NOK ",
+                      format(round(icer_up), big.mark = ","),
+                      " per UP avoided (TL vs FemBloc®)"),
+    x        = "Incremental UPs (FemBloc® vs TL, per average woman)",
+    y        = "Incremental Cost (NOK, FemBloc® vs TL)",
+    caption  = paste0(
+      "Diamond = base case  |  Southwest = FemBloc® less costly but more UPs\n",
+      "Reference thresholds: NOK 10,000 (orange), 25,000 (red), 50,000 (purple) per UP avoided"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle = element_text(color = "grey40", size = 9),
+    plot.caption  = element_text(color = "grey50", size = 8),
+    legend.position = "none"
+  )
+
+print(ce_up_plane)
+ggsave("fembloc_ce_plane_UP.png", ce_up_plane,
+       width = 10, height = 6, dpi = 300, bg = "white")
+cat("UP-based CE plane saved as fembloc_ce_plane_UP.png\n")
+
+# -----------------------------------------------------------------------------
+# EXPORT — add ft7 to main document and save
+# -----------------------------------------------------------------------------
+doc <- doc |>
+  body_add_par("", style = "Normal") |>
+  body_add_break() |>
+  body_add_flextable(ft7)
+
+print(doc, target = "fembloc_results_tables.docx")
+cat("All tables (including UP analysis) saved to fembloc_results_tables.docx\n")
+
+# Separate document for supervisor
+doc_up <- read_docx() |>
+  body_add_par("FemBloc CEA — Unintended Pregnancy Analysis",
+               style = "heading 1") |>
+  body_add_par("", style = "Normal") |>
+  body_add_flextable(ft7) |>
+  body_add_par("", style = "Normal") |>
+  body_add_par(paste0(
+    "Note: No formal willingness-to-pay threshold exists for unintended ",
+    "pregnancies avoided. The cost per UP avoided is presented as a ",
+    "supplementary decision-relevant metric alongside the QALY-based ICER, ",
+    "allowing decision-makers to exercise their own value judgement."),
+    style = "Normal")
+
+print(doc_up, target = "fembloc_UP_analysis.docx")
+cat("UP analysis saved to fembloc_UP_analysis.docx\n")
+
+# -----------------------------------------------------------------------------
+# CEAC — UNINTENDED PREGNANCY METRIC
+# Probability FemBloc is cost-effective at varying cost-per-UP thresholds.
+# Note: no formal threshold exists for cost per UP avoided in Norway.
+# Curve presented over a hypothetical range to inform decision-maker judgement.
+# -----------------------------------------------------------------------------
+
+# Threshold range: NOK 0 to 100,000 per UP avoided
+# (base case icer_up = -23,088, so FemBloc is in the SE quadrant —
+#  decision-maker is asking: "is the cost saving worth the extra UPs?")
+wtp_up_seq <- seq(0, 100000, by = 2500)
+
+psa_inc_up_ce <- psa_up_fb - psa_up_tl  # positive = FemBloc has more UPs
+
+ceac_up_agg <- sapply(wtp_up_seq, function(k)
+  mean((psa_inc_cost + k * psa_inc_up_ce) < 0))
+#FemBloc preferred when cost saving exceeds k * extra UPs incurred
+
+ceac_up_df <- data.frame(
+  threshold = wtp_up_seq,
+  prob_fembloc = ceac_up_agg,
+  prob_tl      = 1 - ceac_up_agg
+)
+
+# CEAF — optimal strategy at each threshold
+ceac_up_df$optimal      <- ifelse(ceac_up_df$prob_fembloc >= 0.5,
+                                   "FemBloc\u00ae", "TL")
+ceac_up_df$prob_optimal <- ifelse(ceac_up_df$optimal == "FemBloc\u00ae",
+                                   ceac_up_df$prob_fembloc,
+                                   ceac_up_df$prob_tl)
+
+# --- CEAC plot ---
+ceac_up_plot <- ggplot(ceac_up_df, aes(x = threshold / 1000)) +
+  geom_line(aes(y = prob_fembloc), color = "#1B3A6B", linewidth = 1.0) +
+  geom_line(aes(y = prob_tl),      color = "#CC0000",  linewidth = 1.0,
+            linetype = "dashed") +
+  geom_hline(yintercept = 0.5, linetype = "dotted",
+             color = "grey50", linewidth = 0.5) +
+  geom_vline(xintercept = abs(icer_up) / 1000,
+             linetype = "dashed", color = "grey40", linewidth = 0.6) +
+  scale_x_continuous(breaks = seq(0, 100, by = 20),
+                     labels = scales::comma) +
+  scale_y_continuous(labels = scales::percent,
+                     limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.1)) +
+  labs(
+    title    = "Cost-Effectiveness Acceptability Curve \u2014 Unintended Pregnancies",
+    subtitle = paste0("Probability each strategy is preferred at varying ",
+                      "cost-per-UP-avoided thresholds"),
+    x        = "Maximum acceptable cost per UP avoided (NOK thousands)",
+    y        = "Probability strategy is preferred",
+    caption  = paste0(
+      "Navy = FemBloc\u00ae preferred | Red dashed = TL preferred\n",
+      "Grey dashed = base case |inc cost per UP| = NOK ",
+      format(round(abs(icer_up)), big.mark = ","),
+      " | No formal threshold exists for cost per UP avoided in Norway"
+    )
+  ) +
+  annotate("text", x = abs(icer_up) / 1000 + 2, y = 0.15,
+           label = paste0("NOK ", format(round(abs(icer_up)), big.mark = ",")),
+           size = 3, color = "grey40", hjust = 0) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title    = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle = element_text(color = "grey40", size = 9),
+    plot.caption  = element_text(color = "grey50", size = 8)
+  )
+
+# --- CEAF plot ---
+ceaf_up_plot <- ggplot(ceac_up_df, aes(x = threshold / 1000)) +
+  geom_line(aes(y = prob_fembloc), color = "#1B3A6B",
+            linetype = "dashed", linewidth = 0.5, alpha = 0.4) +
+  geom_line(aes(y = prob_tl), color = "#CC0000",
+            linetype = "dashed", linewidth = 0.5, alpha = 0.4) +
+  geom_line(aes(y = prob_optimal, color = optimal), linewidth = 1.2) +
+  geom_hline(yintercept = 0.5, linetype = "dotted",
+             color = "grey50", linewidth = 0.5) +
+  geom_vline(xintercept = abs(icer_up) / 1000,
+             linetype = "dashed", color = "grey40", linewidth = 0.6) +
+  scale_color_manual(values = c("FemBloc\u00ae" = "#1B3A6B",
+                                 "TL"           = "#CC0000"),
+                     name = "Optimal strategy") +
+  scale_x_continuous(breaks = seq(0, 100, by = 20),
+                     labels = scales::comma) +
+  scale_y_continuous(labels = scales::percent,
+                     limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.1)) +
+  labs(
+    title    = "Cost-Effectiveness Acceptability Frontier \u2014 Unintended Pregnancies",
+    subtitle = "Probability that the optimal strategy is preferred",
+    x        = "Maximum acceptable cost per UP avoided (NOK thousands)",
+    y        = "Probability optimal strategy is preferred",
+    caption  = paste0(
+      "Solid = CEAF (optimal strategy) | Dashed = CEAC for each strategy\n",
+      "Grey dashed = base case |inc cost per UP| = NOK ",
+      format(round(abs(icer_up)), big.mark = ","),
+      " | No formal threshold exists for cost per UP avoided in Norway"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle   = element_text(color = "grey40", size = 9),
+    plot.caption    = element_text(color = "grey50", size = 8),
+    legend.position = "bottom"
+  )
+
+print(ceac_up_plot)
+print(ceaf_up_plot)
+
+ggsave("fembloc_ceac_UP.png", ceac_up_plot,
+       width = 10, height = 6, dpi = 300, bg = "white")
+ggsave("fembloc_ceaf_UP.png", ceaf_up_plot,
+       width = 10, height = 6, dpi = 300, bg = "white")
+cat("UP-based CEAC and CEAF saved.\n")
+
+# -----------------------------------------------------------------------------
+# CEAC — UP METRIC, BY AGE GROUP (Option B: proportional approximation)
+#
+# Per-age-group UP vectors were not stored in the PSA.
+# Age-group UP contributions are approximated by scaling the aggregate
+# PSA incremental UPs by each age group's deterministic share.
+# This preserves PSA uncertainty while distributing it proportionally.
+# -----------------------------------------------------------------------------
+
+# Deterministic per-age-group incremental UPs
+det_inc_up_by_age <- sapply(1:nrow(age_groups), function(i)
+  sum(results_fembloc[[i]]$up_vec - results_tl[[i]]$up_vec) * age_groups$prop[i])
+names(det_inc_up_by_age) <- age_groups$group
+
+det_inc_up_total <- sum(det_inc_up_by_age)
+
+cat("Deterministic incremental UPs by age group:\n")
+print(round(det_inc_up_by_age, 4))
+cat("Total:", round(det_inc_up_total, 4), "\n")
+
+# Age-group share of total incremental UPs
+age_up_share <- det_inc_up_by_age / det_inc_up_total
+cat("\nAge group share of incremental UPs:\n")
+print(round(age_up_share, 3))
+
+# Approximate PSA incremental UPs per age group
+# psa_inc_up_ce = psa_up_fb - psa_up_tl (positive = FemBloc has more UPs)
+psa_inc_up_by_age <- sapply(age_groups$group, function(grp)
+  psa_inc_up_ce * age_up_share[grp])
+
+# CEAC by age group
+ceac_up_by_age <- sapply(age_groups$group, function(grp) {
+  i      <- which(age_groups$group == grp)
+  inc_c  <- psa_age_cost_fb[, i] - psa_age_cost_tl[, i]
+  inc_up <- psa_inc_up_by_age[, grp]
+  sapply(wtp_up_seq, function(k)
+    mean((inc_c + k * inc_up) < 0))
+})
+
+# Build plotting data frame
+ceac_up_age_df <- data.frame(
+  threshold = wtp_up_seq,
+  Aggregate = ceac_up_agg
+)
+ceac_up_age_df <- cbind(ceac_up_age_df, as.data.frame(ceac_up_by_age))
+
+# Reshape
+ceac_up_long <- tidyr::pivot_longer(ceac_up_age_df,
+                                     cols      = -threshold,
+                                     names_to  = "group",
+                                     values_to = "prob_fembloc")
+
+# Plot
+ceac_up_age_plot <- ggplot(ceac_up_long,
+                            aes(x = threshold / 1000,
+                                y = prob_fembloc,
+                                color    = group,
+                                linewidth = ifelse(group == "Aggregate", 1.2, 0.6),
+                                linetype  = ifelse(group == "Aggregate",
+                                                   "solid", "dashed"))) +
+  geom_line() +
+  geom_hline(yintercept = 0.5, linetype = "dotted",
+             color = "grey50", linewidth = 0.5) +
+  geom_vline(xintercept = abs(icer_up) / 1000,
+             linetype = "dashed", color = "#CC0000",
+             linewidth = 0.8) +
+  scale_x_continuous(breaks = seq(0, 100, by = 20)) +
+  scale_y_continuous(labels = scales::percent,
+                     limits = c(0, 1),
+                     breaks = seq(0, 1, by = 0.1)) +
+  scale_color_manual(values = c(
+    "Aggregate" = "#1B3A6B",
+    "25-29"     = "#4E9AF1",
+    "30-34"     = "#2ECC71",
+    "35-39"     = "#F39C12",
+    "40-44"     = "#9B59B6",
+    "45-50"     = "#E74C3C"
+  )) +
+  scale_linewidth_identity() +
+  scale_linetype_identity() +
+  labs(
+    title    = "Cost-Effectiveness Acceptability Curve \u2014 Unintended Pregnancies",
+    subtitle = "Probability FemBloc\u00ae is preferred, by age group",
+    x        = "Maximum acceptable cost per UP avoided (NOK thousands)",
+    y        = "Probability FemBloc\u00ae preferred",
+    color    = "Group",
+    caption  = paste0(
+      "Red dashed = base case |ICER| = NOK ",
+      format(round(abs(icer_up)), big.mark = ","),
+      " per UP avoided\n",
+      "Age-group curves approximate: PSA incremental UPs distributed ",
+      "proportionally to deterministic age-group contributions"
+    )
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title      = element_text(face = "bold", color = "#1B3A6B"),
+    plot.subtitle   = element_text(color = "grey40", size = 9),
+    plot.caption    = element_text(color = "grey50", size = 8),
+    legend.position = "right"
+  )
+
+print(ceac_up_age_plot)
+ggsave("fembloc_ceac_UP_byage.png", ceac_up_age_plot,
+       width = 10, height = 6, dpi = 300, bg = "white")
+cat("UP CEAC by age group saved as fembloc_ceac_UP_byage.png\n")
+
+```
+
+```{r}
+
+```
+
