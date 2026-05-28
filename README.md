@@ -1,4 +1,4 @@
-This repository contains the complete R-code for a Cost-effectiveness analysis comparing FemBloc® (novel permanent contraceptive device) to Tubal Ligation (TL) for permanent contraception for Norwegian women aged 25-50. The analyysis is conducted from an extended healthcare perspective incorporating direct medical costs, travel expenses and lost leisure time in accordance with NOMA guidelines.
+This repository contains the complete R-code for a Cost-effectiveness analysis comparing FemBloc® (novel permanent contraceptive device) to Tubal Ligation (TL) for permanent contraception for Norwegian women aged 25-50. The analyysis is conducted from an extended healthcare perspective incorporating direct medical costs, travel expenses and lost leisure time in accordance with NoMA guidelines. This analysis was conducted as part of an academic thesis, Femasys Inc. had no role in the design, analysis, results nor discussion. 
 
 # Key Features 
 
@@ -45,4 +45,6 @@ library(zoo)           # Rolling statistics
 
 # Citation
 
-Omondi, N.A (2026). Cost-Effectiveness of FemBloc® VS Tubal Ligation for permanent contraception in Norwegian women aged 25-50: A 25-year Hybrid Decision-Tree Markov Model. [Thesis/Dissertation]. University Of Oslo.
+Omondi, N.A (2026). Cost-Effectiveness of FemBloc® VS Tubal Ligation for permanent contraception in Norwegian women aged 25-50: A 25-year Hybrid Decision-Tree Markov Model. [Thesis/Dissertation]. University Of Oslo. Erasmus University Rotterdam. 
+ORCID: 0009-0000-0168-545X.
+
