@@ -11,7 +11,6 @@ subtitle: "Norwegian Women Aged 25–50 | 25-Year Hybrid Decision-Tree Markov Mo
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-knitr::opts_knit$set(root.dir = "~/Desktop/Thesis- FEMBLOC/Submission docs/UPDATED R-code")
 ```
 
 ```{r}
